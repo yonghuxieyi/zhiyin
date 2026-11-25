@@ -448,9 +448,11 @@ public struct ASTResponse: Sendable, Equatable {
     }
 
     /// Decodes one TranslateResponse message. Returns nil when the
-    /// bytes are not a decodable response.
+    /// bytes are not a decodable response (empty, truncated, or
+    /// carrying no fields at all — a real response always has
+    /// response_meta and an event).
     public static func decode(_ data: Data) -> ASTResponse? {
-        guard let fields = try? Protobuf.decode(data) else { return nil }
+        guard let fields = try? Protobuf.decode(data), !fields.isEmpty else { return nil }
         var response = ASTResponse()
         if let metaData = fields.bytes(1), let meta = try? Protobuf.decode(metaData) {
             response.sessionID = meta.string(1)
