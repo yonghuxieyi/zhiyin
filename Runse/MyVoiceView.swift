@@ -157,12 +157,15 @@ struct MyVoiceView: View {
         statusMessage = nil
         testAudio = nil
         do {
-            try await recorder.start { seconds in
-                recordedSeconds = seconds
-            }
+            let ticks = try await recorder.start()
             recordedSeconds = 0
             recordedURL = nil
             isRecording = true
+            Task {
+                for await seconds in ticks {
+                    recordedSeconds = seconds
+                }
+            }
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -242,15 +245,18 @@ struct MyVoiceView: View {
 
 /// Records 16 kHz mono WAV for voice cloning. WAV is written directly
 /// so the file can be Base64-encoded and sent to DashScope as-is.
+/// Elapsed seconds come back as an AsyncStream: a plain escaping
+/// closure would have to capture the view's @State, which Swift 6
+/// rejects when the closure crosses to this nonisolated recorder.
 private final class MyVoiceRecorder: NSObject, AVAudioRecorderDelegate {
     private var recorder: AVAudioRecorder?
     private var timer: Timer?
     private var seconds = 0
-    private var onTick: ((Int) -> Void)?
+    private var tickContinuation: AsyncStream<Int>.Continuation?
 
     var recordedSeconds: Int { seconds }
 
-    func start(onTick: @escaping (Int) -> Void) async throws {
+    func start() async throws -> AsyncStream<Int> {
         let granted = await AVAudioApplication.requestRecordPermission()
         guard granted else {
             throw QwenVoiceError.notConfigured("麦克风权限")
@@ -270,22 +276,27 @@ private final class MyVoiceRecorder: NSObject, AVAudioRecorderDelegate {
         let recorder = try AVAudioRecorder(url: url, settings: settings)
         recorder.delegate = self
         self.recorder = recorder
-        self.onTick = onTick
         seconds = 0
         recorder.record()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.seconds += 1
-            self.onTick?(self.seconds)
-            if self.seconds >= 30 {
-                _ = self.stop()
+        let stream = AsyncStream<Int> { continuation in
+            self.tickContinuation = continuation
+            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                self.seconds += 1
+                self.tickContinuation?.yield(self.seconds)
+                if self.seconds >= 30 {
+                    _ = self.stop()
+                }
             }
         }
+        return stream
     }
 
     func stop() -> URL? {
         timer?.invalidate()
         timer = nil
+        tickContinuation?.finish()
+        tickContinuation = nil
         let url = recorder?.url
         recorder?.stop()
         recorder = nil
