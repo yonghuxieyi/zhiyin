@@ -161,32 +161,32 @@ public enum Protobuf {
 }
 
 extension Array where Element == Protobuf.Field {
-    func varint(_ field: Int) -> UInt64? {
+    public func varint(_ field: Int) -> UInt64? {
         first { $0.fieldNumber == field }.flatMap {
             if case .varint(_, let value) = $0 { return value }
             return nil
         }
     }
 
-    func bytes(_ field: Int) -> Data? {
+    public func bytes(_ field: Int) -> Data? {
         first { $0.fieldNumber == field }.flatMap {
             if case .bytes(_, let value) = $0 { return value }
             return nil
         }
     }
 
-    func string(_ field: Int) -> String? {
+    public func string(_ field: Int) -> String? {
         bytes(field).flatMap { String(data: $0, encoding: .utf8) }
     }
 
-    func fixed32(_ field: Int) -> UInt32? {
+    public func fixed32(_ field: Int) -> UInt32? {
         first { $0.fieldNumber == field }.flatMap {
             if case .fixed32(_, let value) = $0 { return value }
             return nil
         }
     }
 
-    func all(_ field: Int) -> [Protobuf.Field] {
+    public func all(_ field: Int) -> [Protobuf.Field] {
         filter { $0.fieldNumber == field }
     }
 }

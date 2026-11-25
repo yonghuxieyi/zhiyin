@@ -31,6 +31,13 @@ public struct LatencyBudget: Sendable, Equatable {
     /// Playback buffer before the first audio reaches the ear, ms.
     public var playbackMs: Double = 150
 
+    public init(chunkMs: Double = 80, networkMs: Double = 150, serviceMs: Double = 2530, playbackMs: Double = 150) {
+        self.chunkMs = chunkMs
+        self.networkMs = networkMs
+        self.serviceMs = serviceMs
+        self.playbackMs = playbackMs
+    }
+
     /// Streaming (pipelined) end-to-end latency: service + playback.
     public var pipelinedMs: Double { serviceMs + playbackMs }
 
@@ -48,6 +55,16 @@ public struct LatencyBudget: Sendable, Equatable {
         public var firstTTSAudioMs: Double?
         /// Session start to first translation text, ms.
         public var sessionStartToFirstTranslationMs: Double?
+
+        public init(
+            firstTranslationTextMs: Double? = nil,
+            firstTTSAudioMs: Double? = nil,
+            sessionStartToFirstTranslationMs: Double? = nil
+        ) {
+            self.firstTranslationTextMs = firstTranslationTextMs
+            self.firstTTSAudioMs = firstTTSAudioMs
+            self.sessionStartToFirstTranslationMs = sessionStartToFirstTranslationMs
+        }
 
         public var endToEndMs: Double? { firstTTSAudioMs ?? firstTranslationTextMs }
 

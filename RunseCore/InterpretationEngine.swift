@@ -457,7 +457,7 @@ public final class InterpretationEngine: ObservableObject {
     /// wrong-direction session gets the same mic audio in a language
     /// it does not expect; until real sessions confirm what it does
     /// with that audio, its output stays hidden.
-    nonisolated static func passesGate(_ segment: InterpretationSegment, expectedSource: TextLanguage) -> Bool {
+    nonisolated public static func passesGate(_ segment: InterpretationSegment, expectedSource: TextLanguage) -> Bool {
         guard !segment.sourceText.isEmpty else { return true }
         return TextLanguage.detect(segment.sourceText) == expectedSource
     }
