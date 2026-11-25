@@ -22,11 +22,11 @@ struct VoiceView: View {
     @State private var transcript = ""
     @State private var translation = ""
     @State private var errorMessage: String?
-    @State private var lastPCM: Data?
+    @State private var lastAudio: Data?
     @State private var isPlaying = false
 
     private let pipeline = TranslationPipeline()
-    private let player = PCMPlayer()
+    private let player = AudioPlayer()
     private let recorder = VoiceRecorder()
     @State private var asrClient: VolcanoASRClient?
 
@@ -94,7 +94,7 @@ struct VoiceView: View {
                             } label: {
                                 Label(isPlaying ? "正在播放" : "播放译文", systemImage: "speaker.wave.2")
                             }
-                            .disabled(lastPCM == nil)
+                            .disabled(lastAudio == nil)
                         }
                     }
 
@@ -155,7 +155,7 @@ struct VoiceView: View {
         errorMessage = nil
         transcript = ""
         translation = ""
-        lastPCM = nil
+        lastAudio = nil
         phase = .listening
         do {
             let client = VolcanoASRClient(config: config)
@@ -245,8 +245,8 @@ struct VoiceView: View {
         // Read the translation aloud. If TTS fails the text stays.
         if let config {
             do {
-                let pcm = try await VolcanoTTSClient(config: config).synthesize(text: translation)
-                lastPCM = pcm
+                let audio = try await VolcanoTTSClient(config: config).synthesize(text: translation)
+                lastAudio = audio
                 playTranslation()
             } catch {
                 errorMessage = "译文已出，但语音合成失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
@@ -256,9 +256,9 @@ struct VoiceView: View {
 
     @MainActor
     private func playTranslation() {
-        guard let lastPCM else { return }
+        guard let lastAudio else { return }
         do {
-            try player.play(pcm: lastPCM, sampleRate: 24000)
+            try player.play(data: lastAudio)
             isPlaying = true
             Task {
                 try? await Task.sleep(for: .seconds(10))

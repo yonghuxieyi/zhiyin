@@ -3,29 +3,39 @@ import Foundation
 
 /// Doubao voice (Volcano engine) streaming ASR 2.0 and TTS 2.0.
 ///
-/// Protocol, per the Volcano "豆包语音" docs:
-/// - ASR: `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel`, auth
-///   headers `X-Api-App-Key` (AppID), `X-Api-Access-Key` (Access Token),
-///   `X-Api-Resource-Id: volc.seedasr.sauc.duration`, `X-Api-Request-Id`
-///   (UUID), `X-Api-Sequence: -1`. Binary frames: byte 0 `0x11`
-///   (protocol v1, 4-byte header), byte 1 message type (0x1 full client
-///   request, 0x2 audio only, 0x9 full server response, 0xF server error)
-///   plus flags, byte 2 serialization (0 raw, 1 JSON) plus compression,
-///   byte 3 reserved, then a 4-byte big-endian payload size and payload.
-/// - TTS: `wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream`,
-///   headers `X-Api-Key`, `X-Api-Resource-Id: seed-tts-2.0`,
-///   `X-Api-Request-Id`. One JSON frame carries the text; the server
-///   streams raw PCM audio frames back. A finish frame (flags `0b100`)
-///   closes the connection.
+/// - ASR (streaming recognition): WebSocket binary protocol, per the
+///   Volcano "豆包语音" docs: `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel`,
+///   auth headers `X-Api-App-Key` (AppID), `X-Api-Access-Key` (Access
+///   Token), `X-Api-Resource-Id: volc.seedasr.sauc.duration`,
+///   `X-Api-Request-Id` (UUID), `X-Api-Sequence: -1`. Binary frames:
+///   byte 0 `0x11` (protocol v1, 4-byte header), byte 1 message type
+///   (0x1 full client request, 0x2 audio only, 0x9 full server response,
+///   0xF server error) plus flags, byte 2 serialization (0 raw, 1 JSON)
+///   plus compression, byte 3 reserved, then a 4-byte big-endian payload
+///   size and payload. The ASR path is written from the docs and has not
+///   been live-tested yet (no Access Token retrieved); treat the first
+///   live call as the real test.
+/// - TTS (synthesis): V3 ASYNC API, verified working 2026-11-25. Do NOT
+///   use the V1 endpoint (`POST /api/v1/tts`, resource `volc.tts`):
+///   this app has no grant for it and it returns 401 "load grant:
+///   requested grant not found". V3: `POST /api/v3/tts/submit` then
+///   `POST /api/v3/tts/query`, resource `seed-tts-2.0`, headers
+///   `X-Api-App-Id`, `X-Api-Access-Key`, `X-Api-Resource-Id`,
+///   `X-Api-Request-Id`. submit returns `{"code": 20000000, "data":
+///   {"task_id": ..., "task_status": 1}}` (task id is under `data`);
+///   query returns `data.task_status` 1 running / 2 success / 3 failed
+///   and, on success, `data.audio_url`, a signed MP3 link that expires
+///   in 1 hour — download it immediately. Verified: "你好，世界" took
+///   ~9s, 32904-byte MP3, 1.632s of audio. Do not add an `additions`
+///   field (`explicit_language`): the server rejects it.
+///   True streaming TTS (audio while text streams) would use
+///   `wss://openspeech.bytedance.com/api/v3/tts/bidirection`; v1 uses
+///   the verified async API and plays the finished MP3.
 ///
 /// The AppID and Access Token live in the keychain (services
 /// `Zhiyin.VolcanoAppID` / `Zhiyin.VolcanoAccessToken`, account
 /// `default`). They are never written into code or config files. Without
 /// them the voice UI reports "not configured" and refuses to start.
-///
-/// NOTE: this code is written from the public protocol docs and has not
-/// been exercised against the live service (no Access Token has been
-/// retrieved yet). Treat the first live call as the real test.
 public enum VolcanoVoiceError: Error, LocalizedError, Equatable {
     case notConfigured
     case connectionFailed(String)
@@ -350,110 +360,139 @@ public actor VolcanoASRClient {
     }
 }
 
-// MARK: - Streaming TTS 2.0
+// MARK: - TTS 2.0 (V3 async API, verified working 2026-11-25)
 
-/// One-shot text to speech over the unidirectional streaming endpoint.
-/// Returns raw PCM (24 kHz, mono, 16-bit) for playback.
+/// Text to speech over the V3 async API: submit, poll query, download
+/// the signed MP3 link. Verified end to end: "你好，世界" took ~9s and
+/// returned a 32904-byte MP3 (1.632s of audio).
 public actor VolcanoTTSClient {
+    /// Default voice, verified with the submit API.
+    public static let defaultSpeaker = "zh_female_gaolengyujie_uranus_bigtts"
+
     private let config: VolcanoVoiceConfig
     private let session: URLSession
-    private var socketTask: URLSessionWebSocketTask?
 
     public init(config: VolcanoVoiceConfig, session: URLSession = .shared) {
         self.config = config
         self.session = session
     }
 
+    /// Synthesizes `text` and returns the MP3 audio data.
     public func synthesize(text: String) async throws -> Data {
         guard config.isComplete else { throw VolcanoVoiceError.notConfigured }
-        var request = URLRequest(url: URL(string: "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream")!)
-        request.setValue(config.accessToken, forHTTPHeaderField: "X-Api-Key")
-        request.setValue("seed-tts-2.0", forHTTPHeaderField: "X-Api-Resource-Id")
-        request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Api-Request-Id")
-        let task = session.webSocketTask(with: request)
-        socketTask = task
-        let reader = VolcanoSocketReader(task: task)
-        task.resume()
-        defer {
-            task.cancel(with: .goingAway, reason: nil)
-            socketTask = nil
-        }
-        let payload = try JSONSerialization.data(withJSONObject: requestJSON(text: text), options: [])
-        try await task.send(.data(VolcanoFrame.encode(type: 0x1, flags: 0, jsonPayload: payload)))
-        let audio = try await withThrowingTaskGroup(of: Data.self) { group in
-            group.addTask { try await Self.collectAudio(reader: reader) }
-            group.addTask {
-                try await Task.sleep(for: .seconds(60))
-                throw VolcanoVoiceError.timeout
-            }
-            guard let result = try await group.next() else { throw VolcanoVoiceError.timeout }
-            group.cancelAll()
-            return result
-        }
-        // Send the finish frame, then close.
-        try? await task.send(.data(VolcanoFrame.encode(type: 0x1, flags: 0b100, jsonPayload: Data())))
-        guard !audio.isEmpty else { throw VolcanoVoiceError.invalidResponse }
-        return audio
+        let taskID = try await submit(text: text)
+        let audioURL = try await waitForAudio(taskID: taskID)
+        guard let url = URL(string: audioURL) else { throw VolcanoVoiceError.invalidResponse }
+        // The signed link expires in 1 hour; download it immediately.
+        let (data, _) = try await session.data(from: url)
+        guard !data.isEmpty else { throw VolcanoVoiceError.invalidResponse }
+        return data
     }
 
-    /// Collects raw audio frames until the socket closes. JSON frames are
-    /// control messages: a non-zero code is a server error.
-    private static func collectAudio(reader: VolcanoSocketReader) async throws -> Data {
-        var audio = Data()
-        while let frame = await reader.nextFrame() {
-            if frame.isJSON {
-                if let object = try? JSONSerialization.jsonObject(with: frame.payload) as? [String: Any],
-                   let code = object["code"] as? Int, code != 0 {
-                    throw VolcanoVoiceError.serverError(code, object["message"] as? String ?? "unknown error")
-                }
-                continue
-            }
-            audio.append(frame.payload)
-        }
-        return audio
-    }
-
-    private func requestJSON(text: String) -> [String: Any] {
-        [
+    private func submit(text: String) async throws -> String {
+        var request = URLRequest(url: URL(string: "https://openspeech.bytedance.com/api/v3/tts/submit")!)
+        request.httpMethod = "POST"
+        setAuthHeaders(&request)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
             "user": ["uid": UUID().uuidString],
+            "unique_id": UUID().uuidString,
             "namespace": "BidirectionalTTS",
             "req_params": [
                 "text": text,
-                "text_type": "plain",
-                "audio_params": ["format": "pcm", "sample_rate": 24000]
+                "speaker": Self.defaultSpeaker,
+                "audio_params": ["format": "mp3", "sample_rate": 24000, "speech_rate": 0, "loudness_rate": 0]
             ]
         ]
+        // NOTE: do not add an `additions` field (explicit_language): the
+        // server rejects it with a parameter error.
+        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw VolcanoVoiceError.connectionFailed("TTS submit HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+        }
+        return try Self.parseSubmitResponse(data)
+    }
+
+    /// Polls query once a second until the task succeeds or fails.
+    /// Verified short texts finish in ~9s; give up at 120s.
+    private func waitForAudio(taskID: String) async throws -> String {
+        for _ in 0..<120 {
+            try await Task.sleep(for: .seconds(1))
+            let (status, audioURL) = try await query(taskID: taskID)
+            switch status {
+            case 2:
+                guard let url = audioURL, !url.isEmpty else { throw VolcanoVoiceError.invalidResponse }
+                return url
+            case 3:
+                throw VolcanoVoiceError.serverError(3, "TTS task failed")
+            default:
+                continue
+            }
+        }
+        throw VolcanoVoiceError.timeout
+    }
+
+    private func query(taskID: String) async throws -> (status: Int, audioURL: String?) {
+        var request = URLRequest(url: URL(string: "https://openspeech.bytedance.com/api/v3/tts/query")!)
+        request.httpMethod = "POST"
+        setAuthHeaders(&request)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["task_id": taskID], options: [])
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw VolcanoVoiceError.connectionFailed("TTS query HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+        }
+        return try Self.parseQueryResponse(data)
+    }
+
+    private func setAuthHeaders(_ request: inout URLRequest) {
+        request.setValue(config.appID, forHTTPHeaderField: "X-Api-App-Id")
+        request.setValue(config.accessToken, forHTTPHeaderField: "X-Api-Access-Key")
+        request.setValue("seed-tts-2.0", forHTTPHeaderField: "X-Api-Resource-Id")
+        request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Api-Request-Id")
+    }
+
+    /// submit returns `{"code": 20000000, "data": {"task_id": ...,
+    /// "task_status": 1}}`. The task id lives under `data`, not at the
+    /// top level. Pure function, covered by unit tests.
+    static func parseSubmitResponse(_ data: Data) throws -> String {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let code = object["code"] as? Int, code == 20000000,
+              let inner = object["data"] as? [String: Any],
+              let taskID = inner["task_id"] as? String, !taskID.isEmpty else {
+            throw VolcanoVoiceError.invalidResponse
+        }
+        return taskID
+    }
+
+    /// query returns `{"code": 20000000, "data": {"task_status": 1|2|3,
+    /// "audio_url": ...}}`. task_status: 1 running, 2 success, 3 failed.
+    /// Pure function, covered by unit tests.
+    static func parseQueryResponse(_ data: Data) throws -> (status: Int, audioURL: String?) {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let code = object["code"] as? Int, code == 20000000,
+              let inner = object["data"] as? [String: Any],
+              let status = inner["task_status"] as? Int else {
+            throw VolcanoVoiceError.invalidResponse
+        }
+        return (status, inner["audio_url"] as? String)
     }
 }
 
-// MARK: - PCM playback
+// MARK: - Audio playback
 
-/// Plays raw PCM (mono, 16-bit) by wrapping it in a WAV header for
-/// AVAudioPlayer. Playback methods are main-actor isolated because
-/// AVAudioPlayer is a UI-thread object; the initializer is not, so views
-/// can hold one as a stored property.
-public final class PCMPlayer {
+/// Plays audio data (MP3 from the TTS service) with AVAudioPlayer.
+/// Playback methods are main-actor isolated because AVAudioPlayer is a
+/// UI-thread object; the initializer is not, so views can hold one as a
+/// stored property.
+public final class AudioPlayer {
     private var player: AVAudioPlayer?
 
     public init() {}
 
-    @MainActor public func play(pcm: Data, sampleRate: Int) throws {
-        var wav = Data()
-        wav.append("RIFF".data(using: .ascii)!)
-        wav.append(uint32LE(UInt32(36 + pcm.count)))
-        wav.append("WAVE".data(using: .ascii)!)
-        wav.append("fmt ".data(using: .ascii)!)
-        wav.append(uint32LE(16))
-        wav.append(uint16LE(1))
-        wav.append(uint16LE(1))
-        wav.append(uint32LE(UInt32(sampleRate)))
-        wav.append(uint32LE(UInt32(sampleRate * 2)))
-        wav.append(uint16LE(2))
-        wav.append(uint16LE(16))
-        wav.append("data".data(using: .ascii)!)
-        wav.append(uint32LE(UInt32(pcm.count)))
-        wav.append(pcm)
-        player = try AVAudioPlayer(data: wav)
+    @MainActor public func play(data: Data) throws {
+        player = try AVAudioPlayer(data: data)
         player?.prepareToPlay()
         player?.play()
     }
@@ -463,15 +502,5 @@ public final class PCMPlayer {
     @MainActor public func stop() {
         player?.stop()
         player = nil
-    }
-
-    private func uint32LE(_ value: UInt32) -> Data {
-        var value = value.littleEndian
-        return Data(bytes: &value, count: 4)
-    }
-
-    private func uint16LE(_ value: UInt16) -> Data {
-        var value = value.littleEndian
-        return Data(bytes: &value, count: 2)
     }
 }
