@@ -23,7 +23,9 @@ configFiles:
 packages:
   Sophon:
     url: https://github.com/Luminoid/Sophon
-    from: "0.2.0"
+    # NOTE: tag 0.2.0 has no SophonOpenAI product (only SophonCore +
+    # SophonGemini); pin the main commit that adds it instead.
+    commit: "fe795c9fb3b65a3c9a8dc7aaf6d6a4782192c011"
   SwiftAnthropic:
     url: https://github.com/jamesrochabrun/SwiftAnthropic
     from: "2.2.2"
