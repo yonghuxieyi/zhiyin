@@ -26,6 +26,7 @@ struct PDFView: View {
     @State private var isWorking = false
     @State private var progress = ""
     @State private var errorMessage: String?
+    @State private var dualCheckNote: String?
     @State private var exportURL: URL?
     @State private var dualModelCheck = SettingsStore().dualModelCheckEnabled
 
@@ -56,6 +57,11 @@ struct PDFView: View {
                     Text("平时默认关。打开后每段都由第二模型复核，分歧时按裁判规则选（术语命中优先）。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    if let dualCheckNote {
+                        Text(dualCheckNote)
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
                 }
 
                 HStack {
@@ -144,6 +150,7 @@ struct PDFView: View {
             translated = []
             exportURL = nil
             errorMessage = nil
+            dualCheckNote = nil
             isWorking = true
             progress = "正在提取文字…"
             pages = await PDFTranslation.extractPages(from: document)
@@ -160,6 +167,7 @@ struct PDFView: View {
         guard let document else { return }
         isWorking = true
         errorMessage = nil
+        dualCheckNote = nil
         exportURL = nil
         translated = []
         defer { isWorking = false }
@@ -177,6 +185,8 @@ struct PDFView: View {
             let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
             var totalPrompt = 0
             var totalCompletion = 0
+            var didDualCheck = false
+            var dualCheckAttempted = false
             var allTranslated: [PDFTranslatedPage] = []
             for page in pages {
                 progress = "正在翻译第 \(page.index + 1) / \(pages.count) 页"
@@ -199,6 +209,7 @@ struct PDFView: View {
                     var translation = results.map(\.translation).joined(separator: "\n")
                     var check: DualModelCompare.Verdict?
                     if dualModelCheck, line.text.count >= 8 {
+                        dualCheckAttempted = true
                         check = try? await DualModelChecker.check(
                             source: line.text,
                             primaryTranslation: translation,
@@ -206,14 +217,21 @@ struct PDFView: View {
                             targetLanguage: target,
                             template: template,
                             glossary: glossaryEntries,
-                            profiles: profiles
+                            profiles: profiles,
+                            tone: tone
                         )
-                        if let check { translation = check.chosen }
+                        if let check {
+                            didDualCheck = true
+                            translation = check.chosen
+                        }
                     }
                     tlines.append(PDFTranslatedLine(source: line.text, translation: translation, bounds: line.bounds, check: check))
                 }
                 allTranslated.append(PDFTranslatedPage(index: page.index, lines: tlines, isScanned: page.isScanned, pageSize: page.pageSize))
                 translated = allTranslated
+            }
+            if dualModelCheck, dualCheckAttempted, !didDualCheck {
+                dualCheckNote = "双模型校对没生效：第二模型不可用（缺 Key 或调用失败），本次只用了主模型译文。"
             }
             progress = "正在生成 PDF…"
             if let data = PDFTranslation.exportPDF(original: document, translatedPages: allTranslated) {
@@ -232,7 +250,7 @@ struct PDFView: View {
                 model: profile.model,
                 action: .translate,
                 targetLanguage: target,
-                status: dualModelCheck ? "success · 双模型校对" : "success",
+                status: didDualCheck ? "success · 双模型校对" : (dualModelCheck && dualCheckAttempted ? "success · 双模型校对未生效" : "success"),
                 promptTokens: totalPrompt,
                 completionTokens: totalCompletion,
                 totalTokens: totalPrompt + totalCompletion

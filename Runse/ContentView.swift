@@ -563,6 +563,7 @@ struct HistoryView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \TransformHistory.timestamp, order: .reverse) private var items: [TransformHistory]
     @State private var searchText = ""
+    @State private var showingClearConfirm = false
 
     private var filtered: [TransformHistory] {
         guard !searchText.isEmpty else { return items }
@@ -619,10 +620,18 @@ struct HistoryView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button("清空") {
-                    for item in items { modelContext.delete(item) }
-                    try? modelContext.save()
+                    showingClearConfirm = true
                 }
             }
+        }
+        .confirmationDialog("清空全部历史记录？", isPresented: $showingClearConfirm, titleVisibility: .visible) {
+            Button("清空全部", role: .destructive) {
+                for item in items { modelContext.delete(item) }
+                try? modelContext.save()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("此操作不可恢复。")
         }
     }
 }

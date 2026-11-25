@@ -281,7 +281,7 @@ struct InterpretationView: View {
                     }
                 }
             } else {
-                Text("还没实测数字：服务端 S2S 标称 2.53 秒（文档值），加播放缓冲约 2.63 秒，在 3 秒上限内、略高于 2.5 秒目标；第一句出来后这里显示实测值。")
+                Text("还没实测数字：服务端 S2S 标称 2.53 秒（文档值），加播放缓冲后合计约 2.63 秒，在 3 秒上限内、略高于 2.5 秒目标；第一句出来后这里显示实测值。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

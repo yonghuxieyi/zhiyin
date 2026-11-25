@@ -11,6 +11,7 @@ struct TranslateView: View {
     @Query(sort: \ProviderProfile.name) private var profiles: [ProviderProfile]
     @Query(sort: \PromptTemplate.name) private var templates: [PromptTemplate]
     @Query(sort: \GlossaryEntry.sourceTerm) private var glossaryEntries: [GlossaryEntry]
+    @Query(sort: \VocabularyEntry.createdAt, order: .reverse) private var vocabEntries: [VocabularyEntry]
 
     @State private var inputText = ""
     @FocusState private var inputFocused: Bool
@@ -160,8 +161,12 @@ struct TranslateView: View {
                                     Text(row.translation)
                                         .font(.body)
                                     Button {
-                                        modelContext.insert(VocabularyEntry(sourceText: row.source, translation: row.translation))
-                                        try? modelContext.save()
+                                        // Same sentence re-translated gets a new row id;
+                                        // don't insert a duplicate entry for it.
+                                        if !vocabEntries.contains(where: { $0.sourceText == row.source && $0.translation == row.translation }) {
+                                            modelContext.insert(VocabularyEntry(sourceText: row.source, translation: row.translation))
+                                            try? modelContext.save()
+                                        }
                                         savedVocabIDs.insert(row.id)
                                     } label: {
                                         Label(savedVocabIDs.contains(row.id) ? "已收藏" : "收藏", systemImage: savedVocabIDs.contains(row.id) ? "bookmark.fill" : "bookmark")

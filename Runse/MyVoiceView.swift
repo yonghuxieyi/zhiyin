@@ -165,6 +165,15 @@ struct MyVoiceView: View {
                 for await seconds in ticks {
                     recordedSeconds = seconds
                 }
+                // The tick stream also ends on the 30 s auto-stop, when
+                // the recorder already stopped itself: finalize here, or
+                // the recording would be lost (the view would still show
+                // "recording" with no file to clone from).
+                if isRecording {
+                    recordedURL = recorder.stop()
+                    recordedSeconds = recorder.recordedSeconds
+                    isRecording = false
+                }
             }
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -253,6 +262,10 @@ private final class MyVoiceRecorder: NSObject, AVAudioRecorderDelegate {
     private var timer: Timer?
     private var seconds = 0
     private var tickContinuation: AsyncStream<Int>.Continuation?
+    /// Last recording URL, kept after stop() so a second stop() call
+    /// (e.g. the view finalizing after the 30 s auto-stop) still
+    /// returns the file instead of nil.
+    private var lastURL: URL?
 
     var recordedSeconds: Int { seconds }
 
@@ -265,6 +278,7 @@ private final class MyVoiceRecorder: NSObject, AVAudioRecorderDelegate {
         try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
         try session.setActive(true)
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("myvoice-\(UUID().uuidString).wav")
+        lastURL = url
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: 16000,
@@ -297,7 +311,7 @@ private final class MyVoiceRecorder: NSObject, AVAudioRecorderDelegate {
         timer = nil
         tickContinuation?.finish()
         tickContinuation = nil
-        let url = recorder?.url
+        let url = lastURL ?? recorder?.url
         recorder?.stop()
         recorder = nil
         try? AVAudioSession.sharedInstance().setActive(false)

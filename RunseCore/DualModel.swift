@@ -149,6 +149,9 @@ public enum DualModelChecker {
     /// profile, no key, or a failed request) — the caller keeps the
     /// primary translation and reports the failure.
     ///
+    /// `tone` must match the tone used for the primary translation,
+    /// otherwise the two models are compared in different registers.
+    ///
     /// Main-actor isolated on purpose: the caller passes its `@Query`
     /// profiles, and the translation pipeline it drives is main-actor
     /// isolated too.
@@ -160,7 +163,8 @@ public enum DualModelChecker {
         targetLanguage: String,
         template: PromptTemplate,
         glossary: [GlossaryEntry],
-        profiles: [ProviderProfile]
+        profiles: [ProviderProfile],
+        tone: TranslationTone = .default
     ) async throws -> DualModelCompare.Verdict {
         guard let second = secondProfile(for: primary, profiles: profiles) else {
             throw LLMProviderError.invalidURL
@@ -175,7 +179,8 @@ public enum DualModelChecker {
             apiKey: apiKey,
             targetLanguage: targetLanguage,
             template: template,
-            glossary: glossary
+            glossary: glossary,
+            tone: tone
         ) { _, _ in }
         let secondTranslation = results.map(\.translation).joined(separator: "\n")
         let terms = glossary

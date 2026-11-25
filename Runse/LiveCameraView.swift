@@ -11,6 +11,7 @@ struct LiveCameraView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \ProviderProfile.name) private var profiles: [ProviderProfile]
     @Query(sort: \PromptTemplate.name) private var templates: [PromptTemplate]
+    @Query(sort: \GlossaryEntry.sourceTerm) private var glossaryEntries: [GlossaryEntry]
 
     @StateObject private var camera = LiveCameraController()
     @State private var translation = ""
@@ -93,7 +94,7 @@ struct LiveCameraView: View {
                 apiKey: apiKey,
                 targetLanguage: target,
                 template: template,
-                glossary: [],
+                glossary: glossaryEntries,
                 tone: SettingsStore().translationTone,
                 fallbackProfile: fallback?.profile,
                 fallbackAPIKey: fallback?.apiKey
