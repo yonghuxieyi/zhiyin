@@ -236,7 +236,7 @@ struct InterpretationView: View {
                 Text("账户余额")
                 Spacer()
                 if let balance = quota.balanceYuan {
-                    Text("¥\(String(format: "%.2f", balance))")
+                    Text("¥" + String(format: "%.2f", balance))
                         .foregroundStyle(balance < 5 ? .orange : .secondary)
                 } else {
                     Text("¥2.36（2026-11-25 记录）")

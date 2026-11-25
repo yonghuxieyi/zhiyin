@@ -302,7 +302,8 @@ public final class InterpretationEngine: ObservableObject {
             grantPending = false
             fallbackReason = nil
             if startedCount < directions.count {
-                errorMessage = "其中一个方向连接失败（\(lastError ?? "未知原因"），仅单向运行。"
+                let detail = lastError ?? "未知原因"
+                errorMessage = "其中一个方向连接失败（\(detail)，仅单向运行。"
             }
             await startRouterAndFeed()
             fallbackTask?.cancel()
