@@ -114,7 +114,6 @@ final class LiveCameraController: NSObject, ObservableObject {
     @Published private(set) var recognizedText = ""
 
     private let sessionQueue = DispatchQueue(label: "zhiyin.live-camera")
-    private var lastOCRDate = Date.distantPast
     private var ocrInFlight = false
 
     override init() {
@@ -149,20 +148,9 @@ final class LiveCameraController: NSObject, ObservableObject {
         session.startRunning()
     }
 
-    private func claimOCRSlot() -> Bool {
-        guard !ocrInFlight else { return false }
-        let now = Date()
-        guard now.timeIntervalSince(lastOCRDate) >= 2 else { return false }
-        lastOCRDate = now
-        ocrInFlight = true
-        return true
-    }
-
-    private func releaseOCRSlot() {
-        ocrInFlight = false
-    }
-
     private func ocr(_ cgImage: CGImage) {
+        guard !ocrInFlight else { return }
+        ocrInFlight = true
         Task { [weak self] in
             guard let self else { return }
             defer { Task { @MainActor in self.ocrInFlight = false } }
@@ -181,28 +169,35 @@ final class LiveCameraController: NSObject, ObservableObject {
 /// Shared render context for the live camera path. Only the serial
 /// capture queue touches it, and the sample buffer is converted here
 /// (nonisolated) so only the Sendable CGImage ever crosses to the
-/// main actor — a CMSampleBuffer must not be captured by a
-/// main-actor closure (Swift 6 rejects it).
+/// main actor — a CMSampleBuffer must not be captured by a Task or a
+/// main-actor closure (Swift 6 rejects it either way).
 private let liveCameraCIContext = CIContext()
+
+/// Cheap pre-gate for the live camera OCR, checked on the capture
+/// queue so idle frames never pay for a render. Guarded by its lock;
+/// `nonisolated(unsafe)` because the compiler cannot verify lock
+/// discipline. The main-actor `ocrInFlight` guard stays authoritative
+/// for overlapping runs.
+private let liveCameraThrottleLock = NSLock()
+nonisolated(unsafe) private var liveCameraLastOCR = Date.distantPast
+
+private func liveCameraOCRSlotDue() -> Bool {
+    liveCameraThrottleLock.lock()
+    defer { liveCameraThrottleLock.unlock() }
+    let now = Date()
+    guard now.timeIntervalSince(liveCameraLastOCR) >= 2 else { return false }
+    liveCameraLastOCR = now
+    return true
+}
 
 extension LiveCameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
     nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        Task { [weak self] in
-            guard let self else { return }
-            // Claim a 2-second OCR slot first (cheap, no buffer
-            // involved) so idle frames never pay for a render.
-            let slot = await MainActor.run { self.claimOCRSlot() }
-            guard slot else { return }
-            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-                await MainActor.run { self.releaseOCRSlot() }
-                return
-            }
-            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            guard let cgImage = liveCameraCIContext.createCGImage(ciImage, from: ciImage.extent) else {
-                await MainActor.run { self.releaseOCRSlot() }
-                return
-            }
-            await MainActor.run { self.ocr(cgImage) }
+        guard liveCameraOCRSlotDue() else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let cgImage = liveCameraCIContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+        Task { @MainActor in
+            self.ocr(cgImage)
         }
     }
 }
