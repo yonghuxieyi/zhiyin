@@ -9,6 +9,15 @@ struct ContentView: View {
 
     var body: some View {
         TabView(selection: $selection) {
+            TranslateView()
+                .tabItem { Label("翻译", systemImage: "text.badge.checkmark") }
+                .tag(Tab.translate)
+            VoiceView()
+                .tabItem { Label("语音", systemImage: "mic") }
+                .tag(Tab.voice)
+            PhotoView()
+                .tabItem { Label("拍照", systemImage: "camera") }
+                .tag(Tab.photo)
             TryView()
                 .tabItem { Label("Try", systemImage: "wand.and.stars") }
                 .tag(Tab.tryIt)
@@ -42,7 +51,7 @@ struct ContentView: View {
     }
 
     enum Tab {
-        case tryIt, providers, prompts, settings, history
+        case translate, voice, photo, tryIt, providers, prompts, settings, history
     }
 }
 
@@ -890,11 +899,46 @@ struct PromptEditorView: View {
 struct SettingsView: View {
     @State private var language = SettingsStore().defaultTranslationLanguage
     @State private var showingGetStarted = false
+    @State private var showingModelPicker = false
+    @State private var voiceConfigured = false
     private let settings = SettingsStore()
+
+    private var currentModelName: String {
+        ModelCatalog.option(id: settings.selectedModelOptionID, voiceConfigured: voiceConfigured)?.name
+            ?? "DeepSeek 日常"
+    }
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("模型") {
+                    HStack {
+                        Text("当前模型")
+                        Spacer()
+                        Text(currentModelName)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button {
+                        showingModelPicker = true
+                    } label: {
+                        Label("选择模型", systemImage: "cpu")
+                    }
+                }
+
+                Section("语音") {
+                    HStack {
+                        Text("豆包语音")
+                        Spacer()
+                        Text(voiceConfigured ? "已配置" : "未配置")
+                            .foregroundStyle(voiceConfigured ? .green : .orange)
+                    }
+                    if !voiceConfigured {
+                        Text("去“语音”页填 AppID 和 Access Token（只存钥匙串）。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Preferences") {
                     TextField("Default translation language", text: $language)
                         .onChange(of: language) { _, value in
@@ -915,6 +959,13 @@ struct SettingsView: View {
                 GetStartedGuideView {
                     showingGetStarted = false
                 }
+            }
+            .sheet(isPresented: $showingModelPicker) {
+                ModelPickerSheet()
+            }
+            .task {
+                let config = await VolcanoVoiceStore.load()
+                voiceConfigured = config != nil
             }
         }
     }

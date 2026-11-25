@@ -3,7 +3,7 @@ import SwiftData
 
 public enum Bootstrap {
     public static func modelContainer(inMemory: Bool = false) throws -> ModelContainer {
-        let schema = Schema([ProviderProfile.self, PromptTemplate.self, TransformHistory.self])
+        let schema = Schema([ProviderProfile.self, PromptTemplate.self, TransformHistory.self, GlossaryEntry.self])
         let configuration: ModelConfiguration
         if inMemory {
             configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
