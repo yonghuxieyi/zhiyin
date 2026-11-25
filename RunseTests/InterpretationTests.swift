@@ -113,9 +113,10 @@ final class InterpretationTests: XCTestCase {
 
     func testLatencyBudgetWithDocumentedNumbers() {
         let budget = LatencyBudget()
-        // Documented service latency 2.53s + playback buffer.
-        XCTAssertEqual(budget.pipelinedMs, 2680, accuracy: 0.001)
-        XCTAssertEqual(budget.worstCaseMs, 2910, accuracy: 0.001)
+        // Documented service latency 2.53s + playback buffer
+        // (100ms since list item 13 trimmed it from 150ms).
+        XCTAssertEqual(budget.pipelinedMs, 2630, accuracy: 0.001)
+        XCTAssertEqual(budget.worstCaseMs, 2860, accuracy: 0.001)
         // Honest result: within the 3s hard limit, above the 2.5s
         // target on documented numbers alone — the target needs the
         // service to run faster than its documented figure, or a
