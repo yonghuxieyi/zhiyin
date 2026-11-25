@@ -5,6 +5,10 @@
 #   (Xcode 16 cannot build it). `macos-26` ships Xcode 26.
 # - macOS runner minutes bill at 10x the Linux rate, so this workflow
 #   stays minimal: one build, one offline test run, one IPA artifact.
+# - The macos-26 runner's Xcode 26 ships without the iOS device
+#   platform, so a generic-device build fails with
+#   "iOS 26.0 is not installed". Download it first
+#   (`xcodebuild -downloadPlatform iOS`) before building.
 # - Live/network tests are skipped: PinyinLiveTests needs a DeepSeek key,
 #   and the UI tests need one too (see ZHIYIN_TEST_API_KEY /
 #   /tmp/zhiyin-deepseek.key in those tests).
@@ -24,7 +28,7 @@ on:
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +39,9 @@ jobs:
             sudo xcode-select -s "$XCODE26/Contents/Developer"
           fi
           xcodebuild -version
+
+      - name: Download iOS platform
+        run: sudo xcodebuild -downloadPlatform iOS
 
       - name: Install xcodegen
         run: brew install xcodegen
