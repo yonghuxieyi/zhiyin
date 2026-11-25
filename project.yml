@@ -89,6 +89,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.yonghuxieyi.zhiyin
+        PRODUCT_NAME: Zhiyin
         INFOPLIST_KEY_CFBundleDisplayName: 智音
   RunseExtension:
     type: app-extension

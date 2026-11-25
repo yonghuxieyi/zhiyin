@@ -69,15 +69,17 @@ jobs:
 
       - name: Package unsigned IPA
         run: |
-          APP_PATH="build/DerivedData/Build/Products/Debug-iphoneos/Zhiyin.app"
-          if [ ! -d "$APP_PATH" ]; then
-            echo "Zhiyin.app not found under build/DerivedData" >&2
+          # Product name comes from PRODUCT_NAME (Zhiyin), but find the
+          # .app instead of hardcoding it so a rename never breaks this.
+          APP_PATH=$(find build/DerivedData/Build/Products/Debug-iphoneos -maxdepth 1 -name "*.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app found under build/DerivedData/Build/Products/Debug-iphoneos" >&2
             find build/DerivedData -name "*.app" -type d | head
             exit 1
           fi
           rm -rf build/Payload build/Zhiyin-unsigned.ipa
           mkdir -p build/Payload
-          cp -R "$APP_PATH" build/Payload/
+          cp -R "$APP_PATH" build/Payload/Zhiyin.app
           (cd build && zip -qr Zhiyin-unsigned.ipa Payload)
 
       - name: Upload unsigned IPA
