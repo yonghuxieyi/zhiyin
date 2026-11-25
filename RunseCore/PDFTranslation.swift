@@ -134,7 +134,9 @@ public enum PDFTranslation {
 
     /// Renders a scanned page and OCRs it. Boxes are converted from
     /// Vision's normalized top-left coordinates to PDF page
-    /// coordinates (origin bottom-left).
+    /// coordinates (origin bottom-left). Main-actor isolated: it only
+    /// runs from `extractPages`, which hands it a main-actor page.
+    @MainActor
     private static func ocrPage(_ page: PDFPage, size: CGSize) async -> [PDFTextLine] {
         let scale: CGFloat = 2
         let renderSize = CGSize(width: size.width * scale, height: size.height * scale)
