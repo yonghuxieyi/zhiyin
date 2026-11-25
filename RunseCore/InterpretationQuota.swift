@@ -14,7 +14,10 @@ import Foundation
 /// - 语音合成 2.0 (trial): 20000 characters total, to 2027-05-25.
 /// - Account balance: ¥2.36 (2026-11-25). Overage is pay-as-you-go,
 ///   so the page always shows the last known balance and its date.
-public struct InterpretationQuotaStore: Sendable {
+///
+/// Not Sendable: it wraps UserDefaults, which is not Sendable.
+/// The engine (and tests) only touch it from one actor/thread.
+public struct InterpretationQuotaStore {
     public static let liveSessionsFreePerDay = 20
     public static let liveSessionsWarningAt = 16
     public static let asrTrialMinutesTotal: Double = 20 * 60
