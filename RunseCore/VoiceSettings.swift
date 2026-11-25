@@ -73,6 +73,13 @@ public struct VoiceSettings {
         set { defaults.set(min(2.0, max(0.5, newValue)), forKey: "voiceSpeechRate") }
     }
 
+    /// "My voice": when true and a cloned voice exists, synthesis uses
+    /// the user's cloned Qwen voice instead of the Doubao voices.
+    public var useMyVoice: Bool {
+        get { defaults.bool(forKey: "voiceUseMyVoice") }
+        set { defaults.set(newValue, forKey: "voiceUseMyVoice") }
+    }
+
     /// The V3 TTS `speech_rate` parameter is an int in [-50, 100]:
     /// 0 is normal speed, 100 is 2.0x, -50 is 0.5x (official docs).
     /// Pure function, covered by unit tests.

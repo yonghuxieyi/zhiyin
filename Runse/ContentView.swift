@@ -378,6 +378,8 @@ struct SettingsView: View {
     @State private var dashScopeKey = ""
     @State private var dashScopeSaved = false
     @State private var dashScopeError: String?
+    @State private var dashScopeWorkspaceID = ""
+    @State private var workspaceSaved = false
     @Query(sort: \TransformHistory.timestamp, order: .reverse) private var historyItems: [TransformHistory]
     private let settings = SettingsStore()
 
@@ -457,6 +459,24 @@ struct SettingsView: View {
                             .font(.footnote)
                             .foregroundStyle(.red)
                     }
+                    TextField("业务空间 ID（可选）", text: $dashScopeWorkspaceID)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button("保存业务空间 ID") {
+                        Task {
+                            do {
+                                try await DashScopeStore.saveWorkspaceID(dashScopeWorkspaceID.trimmingCharacters(in: .whitespacesAndNewlines))
+                                workspaceSaved = true
+                            } catch {
+                                dashScopeError = "保存失败：\(error.localizedDescription)"
+                            }
+                        }
+                    }
+                    if workspaceSaved {
+                        Text("业务空间 ID 已保存到钥匙串。留空时用默认域名，一样能用。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     Text("Qwen-MT 是备用翻译：DeepSeek 挂了它顶上，平时不用。Key 只存手机钥匙串，不进代码。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -533,6 +553,7 @@ struct SettingsView: View {
                 let config = await VolcanoVoiceStore.load()
                 voiceConfigured = config != nil
                 qwenConfigured = await DashScopeStore.hasKey()
+                dashScopeWorkspaceID = await DashScopeStore.loadWorkspaceID() ?? ""
             }
         }
     }

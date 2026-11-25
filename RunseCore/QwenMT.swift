@@ -40,6 +40,7 @@ public enum QwenMT {
 /// "needs key" and the backup is unavailable.
 public enum DashScopeStore {
     public static let apiKeyService = "Zhiyin.DashScopeAPIKey"
+    public static let workspaceIDService = "Zhiyin.DashScopeWorkspaceID"
     public static let account = "default"
 
     public static func loadKey() async -> String? {
@@ -57,16 +58,35 @@ public enum DashScopeStore {
     public static func hasKey() async -> Bool {
         await loadKey() != nil
     }
+
+    /// The Model Studio workspace ID (console → Workspace Details).
+    /// Needed for the workspace-specific audio domains; when empty the
+    /// legacy dashscope.aliyuncs.com domain is used instead (still
+    /// functional per the docs).
+    public static func loadWorkspaceID() async -> String? {
+        let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
+        guard let id = try? await keychain.load(service: workspaceIDService, account: account),
+              !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return id
+    }
+
+    public static func saveWorkspaceID(_ id: String) async throws {
+        let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
+        try await keychain.save(id, service: workspaceIDService, account: account)
+    }
 }
 
 /// Resolves the configured Qwen-MT backup: the seeded Qwen-MT Flash
-/// profile plus a saved DashScope key. Returns nil when either is
+/// profile plus a saved DashScope key. Returns nil when the key is
 /// missing, in which case translation has no fallback.
+///
+/// Takes no profiles argument on purpose: the backup profile is the
+/// fixed seeded one (`ProviderProfile.qwenMTFlash()`), so callers
+/// never have to send main-actor `@Query` state across to this
+/// nonisolated function (Swift 6 would reject that).
 public enum QwenMTBackup {
-    public static func resolve(profiles: [ProviderProfile]) async -> (profile: ProviderProfile, apiKey: String)? {
-        guard let profile = profiles.first(where: { $0.id == QwenMT.flashProfileID })
-                ?? profiles.first(where: { $0.isQwenMT }) else { return nil }
+    public static func resolve() async -> (profile: ProviderProfile, apiKey: String)? {
         guard let apiKey = await DashScopeStore.loadKey() else { return nil }
-        return (profile, apiKey)
+        return (ProviderProfile.qwenMTFlash(), apiKey)
     }
 }

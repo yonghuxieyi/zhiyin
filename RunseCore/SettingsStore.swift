@@ -34,4 +34,12 @@ public final class SettingsStore {
         }
         set { defaults.set(newValue.rawValue, forKey: "translationTone") }
     }
+
+    /// Dual-model cross-check (清单 14). Off by default; the PDF
+    /// screen switches it on per document when the document is a
+    /// professional one.
+    public var dualModelCheckEnabled: Bool {
+        get { defaults.bool(forKey: "dualModelCheckEnabled") }
+        set { defaults.set(newValue, forKey: "dualModelCheckEnabled") }
+    }
 }

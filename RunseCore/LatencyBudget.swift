@@ -29,9 +29,11 @@ public struct LatencyBudget: Sendable, Equatable {
     /// Service S2S latency, ms (documented 2.53s).
     public var serviceMs: Double = 2530
     /// Playback buffer before the first audio reaches the ear, ms.
-    public var playbackMs: Double = 150
+    /// 100 ms: the streaming TTS player starts on the first PCM chunk
+    /// instead of waiting for a whole MP3, so the buffer can be smaller.
+    public var playbackMs: Double = 100
 
-    public init(chunkMs: Double = 80, networkMs: Double = 150, serviceMs: Double = 2530, playbackMs: Double = 150) {
+    public init(chunkMs: Double = 80, networkMs: Double = 150, serviceMs: Double = 2530, playbackMs: Double = 100) {
         self.chunkMs = chunkMs
         self.networkMs = networkMs
         self.serviceMs = serviceMs

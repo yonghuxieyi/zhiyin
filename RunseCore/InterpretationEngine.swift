@@ -81,6 +81,11 @@ public final class InterpretationEngine: ObservableObject {
     public typealias Translator = @MainActor (String, ASTLanguage, ASTLanguage, String) async throws -> String
     /// Fallback speech: translated text -> MP3 data.
     public typealias Speaker = @MainActor (String) async throws -> Data
+    /// Streaming fallback speech: translated text -> audio played as it
+    /// streams (the closure owns playback). When set, the sequential
+    /// line uses it first and falls back to `Speaker` (async MP3) when
+    /// streaming fails for a sentence.
+    public typealias StreamingSpeaker = @MainActor (String) async throws -> Void
 
     @Published public private(set) var phase: Phase = .idle
     @Published public private(set) var mode: Mode = .live
@@ -104,6 +109,7 @@ public final class InterpretationEngine: ObservableObject {
     private var glossary: [(source: String, target: String)] = []
     private var translator: Translator?
     private var speaker: Speaker?
+    private var streamingSpeaker: StreamingSpeaker?
 
     private var forwardClient: LiveInterpretClient?
     private var reverseClient: LiveInterpretClient?
@@ -134,7 +140,8 @@ public final class InterpretationEngine: ObservableObject {
         config: VolcanoVoiceConfig,
         glossary: [(source: String, target: String)],
         translator: @escaping Translator,
-        speaker: @escaping Speaker
+        speaker: @escaping Speaker,
+        streamingSpeaker: StreamingSpeaker? = nil
     ) async {
         guard phase == .idle || phase == .stopped || phase == .error else { return }
         self.direction = direction
@@ -142,6 +149,7 @@ public final class InterpretationEngine: ObservableObject {
         self.glossary = glossary
         self.translator = translator
         self.speaker = speaker
+        self.streamingSpeaker = streamingSpeaker
         self.segments = []
         self.liveDraftSource = ""
         self.liveDraftTranslation = ""
@@ -204,6 +212,7 @@ public final class InterpretationEngine: ObservableObject {
         reverseClient = nil
         await asrClient?.cancel()
         asrClient = nil
+        streamingSpeaker = nil
         if let start = sessionStartTime, let end = sessionEndTime {
             quotaStore.recordASR(minutes: end.timeIntervalSince(start) / 60.0)
         }
@@ -527,7 +536,7 @@ public final class InterpretationEngine: ObservableObject {
     }
 
     private func translateFallbackSentence(_ sentence: String) async {
-        guard let translator, let speaker else { return }
+        guard let translator, speaker != nil || streamingSpeaker != nil else { return }
         let startedAt = Date()
         let sourceLanguage = TextLanguage.detect(sentence) == .chinese ? ASTLanguage.zh : ASTLanguage.en
         let targetLanguage = sourceLanguage == .zh ? ASTLanguage.en : ASTLanguage.zh
@@ -553,8 +562,20 @@ public final class InterpretationEngine: ObservableObject {
             ))
             quotaStore.recordTTS(chars: translation.count)
             quota = quotaStore.snapshot()
-            let audio = try await speaker(translation)
-            router.playTranslationMP3(audio)
+            // Streaming first (audio starts ~0.5 s in); on a streaming
+            // failure for this sentence, fall back to the async MP3.
+            if let streamingSpeaker {
+                do {
+                    try await streamingSpeaker(translation)
+                } catch {
+                    guard let speaker else { throw error }
+                    let audio = try await speaker(translation)
+                    router.playTranslationMP3(audio)
+                }
+            } else if let speaker {
+                let audio = try await speaker(translation)
+                router.playTranslationMP3(audio)
+            }
         } catch {
             errorMessage = "顺序语音线翻译失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
         }

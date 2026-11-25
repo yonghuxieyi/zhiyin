@@ -18,6 +18,9 @@ struct InterpretationView: View {
     @State private var configChecked = false
     @State private var direction: InterpretationEngine.Direction = .zhToEn
     @State private var selectedSession: InterpretationSession?
+    @State private var streamingClient: VolcanoStreamingTTSClient?
+    @State private var sequentialFirstAudioMs: Double?
+    private let streamingPlayer = StreamingAudioPlayer()
 
     private var isRunning: Bool {
         engine.phase == .live || engine.phase == .fallback || engine.phase == .paused || engine.phase == .connecting
@@ -39,6 +42,7 @@ struct InterpretationView: View {
                     statusSection
                     quotaSection
                     latencySection
+                    glossarySection
                     transcriptSection
                 }
 
@@ -277,10 +281,35 @@ struct InterpretationView: View {
                     }
                 }
             } else {
-                Text("还没实测数字：服务端 S2S 标称 2.53 秒（文档值），加播放缓冲约 2.7 秒，在 3 秒上限内、略高于 2.5 秒目标；第一句出来后这里显示实测值。")
+                Text("还没实测数字：服务端 S2S 标称 2.53 秒（文档值），加播放缓冲约 2.63 秒，在 3 秒上限内、略高于 2.5 秒目标；第一句出来后这里显示实测值。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+            if let sequentialFirstAudioMs {
+                HStack {
+                    Text("顺序线首句语音（流式）")
+                    Spacer()
+                    Text(String(format: "%.0f 毫秒", sequentialFirstAudioMs))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    // MARK: - Glossary
+
+    private var glossarySection: some View {
+        Section("术语表") {
+            let filled = glossaryEntries.filter { !$0.targetTranslation.isEmpty }.count
+            HStack {
+                Text("术语")
+                Spacer()
+                Text("\(filled) 个已填译法 / 共 \(glossaryEntries.count) 个")
+                    .foregroundStyle(.secondary)
+            }
+            Text("直播同传里术语表只能提示模型、不保证每个词都按表翻；强制保证只在顺序线做得到（缺词会重新问一遍）。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -356,7 +385,7 @@ struct InterpretationView: View {
             let template = templates.first { $0.action == .translate }
                 ?? PromptTemplate.builtIns().first { $0.action == .translate }!
             let targetLanguage = target == .en ? "English" : "中文"
-            let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve(profiles: profiles)
+            let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
             let results = try await TranslationPipeline().translate(
                 segments: [text],
                 profile: profile,
@@ -373,22 +402,64 @@ struct InterpretationView: View {
         }
         let speaker: InterpretationEngine.Speaker = { text in
             // `config` is already unwrapped by the guard at the top of
-            // startSession; the closure just captures it. Uses the voice
-            // the user picked (speaker + rate) in the 语音 tab.
+            // startSession; the closure just captures it. "My voice"
+            // (cloned Qwen voice) wins when it is switched on; otherwise
+            // the picked Doubao voice (speaker + rate) from the 语音 tab.
+            if await MyVoice.isEnabled(),
+               let apiKey = await DashScopeStore.loadKey(),
+               let voiceID = await QwenVoiceStore.loadVoiceID() {
+                let settings = VoiceSettings()
+                let workspaceID = await DashScopeStore.loadWorkspaceID()
+                return try await QwenVoiceClone.synthesize(apiKey: apiKey, workspaceID: workspaceID, text: text, voiceID: voiceID, rate: settings.speechRate)
+            }
             let settings = VoiceSettings()
-            try await VolcanoTTSClient(config: config).synthesize(text: text, speaker: settings.speakerID, speechRate: settings.speechRate)
+            return try await VolcanoTTSClient(config: config).synthesize(text: text, speaker: settings.speakerID, speechRate: settings.speechRate)
+        }
+        // Streaming TTS for the sequential line (清单 12): one
+        // connection for the whole session, audio plays as it arrives
+        // instead of waiting ~9 s for a finished MP3. If the
+        // connection fails, the engine falls back to `speaker` above.
+        // Skipped when "my voice" is on: the cloned voice is a
+        // different service (Qwen) and has no streaming path here.
+        sequentialFirstAudioMs = nil
+        var streamingSpeaker: InterpretationEngine.StreamingSpeaker?
+        if await MyVoice.isEnabled() == false {
+            let streamingClient = VolcanoStreamingTTSClient(config: config)
+            do {
+                try await streamingClient.connect()
+                try streamingPlayer.start()
+                self.streamingClient = streamingClient
+                streamingSpeaker = { [streamingPlayer] text in
+                    let settings = VoiceSettings()
+                    try await streamingClient.synthesize(text: text, speaker: settings.speakerID, speechRate: settings.speechRate) { pcm in
+                        streamingPlayer.enqueue(pcm)
+                    }
+                    if sequentialFirstAudioMs == nil,
+                       let ms = await streamingClient.lastFirstAudioLatencyMs {
+                        sequentialFirstAudioMs = ms
+                    }
+                }
+            } catch {
+                self.streamingClient = nil
+            }
         }
         await engine.start(
             direction: direction,
             config: config,
             glossary: glossary,
             translator: translator,
-            speaker: speaker
+            speaker: speaker,
+            streamingSpeaker: streamingSpeaker
         )
     }
 
     private func stopSession() async {
         let record = await engine.stop()
+        streamingPlayer.stop()
+        if let client = streamingClient {
+            streamingClient = nil
+            await client.disconnect()
+        }
         guard !record.segments.isEmpty else { return }
         modelContext.insert(InterpretationSession(record: record))
         try? modelContext.save()

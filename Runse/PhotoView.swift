@@ -39,6 +39,9 @@ struct PhotoView: View {
                     } label: {
                         Label("拍照", systemImage: "camera")
                     }
+                    NavigationLink("实时取景翻译") {
+                        LiveCameraView()
+                    }
                     if let pickedImage {
                         Image(uiImage: pickedImage)
                             .resizable()
@@ -156,7 +159,7 @@ struct PhotoView: View {
             let target = TextLanguage.detect(recognizedText).translationTarget
             let parts = TextSegmenter.segments(for: recognizedText, maxChars: TextSegmenter.maxChars(for: profile))
             var partials = Array(repeating: "", count: parts.count)
-            let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve(profiles: profiles)
+            let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
             let results = try await pipeline.translate(
                 segments: parts,
                 profile: profile,

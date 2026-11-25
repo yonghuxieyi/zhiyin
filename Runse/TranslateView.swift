@@ -92,6 +92,15 @@ struct TranslateView: View {
                     }
                 }
 
+                Section("文档") {
+                    NavigationLink("翻译 PDF 文档") {
+                        PDFView()
+                    }
+                    Text("导入 PDF，按页翻译，导出保留排版的译文 PDF。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 HStack {
                     Button {
                         Task { await runTranslation() }
@@ -218,7 +227,7 @@ struct TranslateView: View {
             if extractedCandidates.isEmpty { extractTerms() }
             let glossary = useGlossary ? glossaryEntries : []
             // Qwen-MT backup: only when the primary is not Qwen-MT itself.
-            let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve(profiles: profiles)
+            let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
             let results = try await pipeline.translate(
                 segments: parts,
                 profile: profile,

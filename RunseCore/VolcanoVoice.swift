@@ -40,9 +40,11 @@ import Foundation
 ///   in 1 hour — download it immediately. Verified: "你好，世界" took
 ///   ~9s, 32904-byte MP3, 1.632s of audio. Do not add an `additions`
 ///   field (`explicit_language`): the server rejects it.
-///   True streaming TTS (audio while text streams) would use
-///   `wss://openspeech.bytedance.com/api/v3/tts/bidirection`; v1 uses
-///   the verified async API and plays the finished MP3.
+///   True streaming TTS (audio while text streams) lives in
+///   `StreamingTTS.swift` (`VolcanoStreamingTTSClient`): the same
+///   endpoint `wss://openspeech.bytedance.com/api/v3/tts/bidirection`,
+///   verified live 2026-11-25 with first audio in 557 ms. The async
+///   API below stays as the fallback when the stream cannot start.
 ///
 /// The AppID and Access Token live in the keychain (services
 /// `Zhiyin.VolcanoAppID` / `Zhiyin.VolcanoAccessToken`, account
