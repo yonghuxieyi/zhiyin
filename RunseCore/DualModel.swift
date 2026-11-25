@@ -132,6 +132,9 @@ public enum DualModelChecker {
             ?? profiles.first { $0.isQwenMT }
     }
 
+    /// Main-actor isolated: callers pass a profile that came from
+    /// `@Query` state, which must not cross to nonisolated code.
+    @MainActor
     public static func secondAPIKey(for profile: ProviderProfile) async -> String? {
         if profile.isQwenMT {
             return await DashScopeStore.loadKey()
