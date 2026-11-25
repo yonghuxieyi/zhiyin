@@ -368,8 +368,9 @@ struct InterpretationView: View {
             return results.first?.translation ?? ""
         }
         let speaker: InterpretationEngine.Speaker = { text in
-            guard let config else { throw VolcanoVoiceError.notConfigured }
-            return try await VolcanoTTSClient(config: config).synthesize(text: text)
+            // `config` is already unwrapped by the guard at the top of
+            // startSession; the closure just captures it.
+            try await VolcanoTTSClient(config: config).synthesize(text: text)
         }
         await engine.start(
             direction: direction,
