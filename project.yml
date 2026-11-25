@@ -24,8 +24,10 @@ packages:
   Sophon:
     url: https://github.com/Luminoid/Sophon
     # NOTE: tag 0.2.0 has no SophonOpenAI product (only SophonCore +
-    # SophonGemini); pin the main commit that adds it instead.
-    commit: "fe795c9fb3b65a3c9a8dc7aaf6d6a4782192c011"
+    # SophonGemini), and XcodeGen has no commit pinning, so track main.
+    # Verified 2026-11-25: main is at fe795c9 (2026-10-10) and declares
+    # SophonOpenAI. Re-pin to a tag if one appears.
+    branch: "main"
   SwiftAnthropic:
     url: https://github.com/jamesrochabrun/SwiftAnthropic
     from: "2.2.2"
