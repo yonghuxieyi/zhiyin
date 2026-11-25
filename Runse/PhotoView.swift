@@ -154,20 +154,25 @@ struct PhotoView: View {
             let template = templates.first { $0.action == .translate }
                 ?? PromptTemplate.builtIns().first { $0.action == .translate }!
             let target = TextLanguage.detect(recognizedText).translationTarget
-            let parts = TextSegmenter.segments(for: recognizedText)
+            let parts = TextSegmenter.segments(for: recognizedText, maxChars: TextSegmenter.maxChars(for: profile))
             var partials = Array(repeating: "", count: parts.count)
+            let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve(profiles: profiles)
             let results = try await pipeline.translate(
                 segments: parts,
                 profile: profile,
                 apiKey: apiKey,
                 targetLanguage: target,
                 template: template,
-                glossary: []
+                glossary: [],
+                tone: SettingsStore().translationTone,
+                fallbackProfile: fallback?.profile,
+                fallbackAPIKey: fallback?.apiKey
             ) { index, partial in
                 partials[index] = partial
                 translation = partials.joined(separator: "\n")
             }
             translation = results.map(\.translation).joined(separator: "\n")
+            let usage = pipeline.lastUsage
             modelContext.insert(TransformHistory(
                 providerID: profile.id,
                 sourceExcerpt: TextExcerpt.make(recognizedText),
@@ -176,7 +181,10 @@ struct PhotoView: View {
                 model: profile.model,
                 action: .translate,
                 targetLanguage: target,
-                status: "success"
+                status: pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success",
+                promptTokens: usage["prompt_tokens"] ?? 0,
+                completionTokens: usage["completion_tokens"] ?? 0,
+                totalTokens: usage["total_tokens"] ?? 0
             ))
             try? modelContext.save()
         } catch {

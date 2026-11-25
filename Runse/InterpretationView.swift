@@ -356,6 +356,7 @@ struct InterpretationView: View {
             let template = templates.first { $0.action == .translate }
                 ?? PromptTemplate.builtIns().first { $0.action == .translate }!
             let targetLanguage = target == .en ? "English" : "中文"
+            let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve(profiles: profiles)
             let results = try await TranslationPipeline().translate(
                 segments: [text],
                 profile: profile,
@@ -363,14 +364,19 @@ struct InterpretationView: View {
                 targetLanguage: targetLanguage,
                 template: template,
                 glossary: glossaryEntries,
-                customInstruction: note
+                customInstruction: note,
+                tone: SettingsStore().translationTone,
+                fallbackProfile: fallback?.profile,
+                fallbackAPIKey: fallback?.apiKey
             ) { _, _ in }
             return results.first?.translation ?? ""
         }
         let speaker: InterpretationEngine.Speaker = { text in
             // `config` is already unwrapped by the guard at the top of
-            // startSession; the closure just captures it.
-            try await VolcanoTTSClient(config: config).synthesize(text: text)
+            // startSession; the closure just captures it. Uses the voice
+            // the user picked (speaker + rate) in the 语音 tab.
+            let settings = VoiceSettings()
+            try await VolcanoTTSClient(config: config).synthesize(text: text, speaker: settings.speakerID, speechRate: settings.speechRate)
         }
         await engine.start(
             direction: direction,

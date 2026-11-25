@@ -25,6 +25,8 @@ struct VoiceView: View {
     @State private var errorMessage: String?
     @State private var lastAudio: Data?
     @State private var isPlaying = false
+    @State private var speakerID = VoiceSettings().speakerID
+    @State private var speechRate = VoiceSettings().speechRate
 
     private let pipeline = TranslationPipeline()
     private let player = AudioPlayer()
@@ -78,6 +80,35 @@ struct VoiceView: View {
                         }
                         if phase == .listening {
                             ProgressView()
+                        }
+                    }
+
+                    Section("声音") {
+                        Picker("声音", selection: $speakerID) {
+                            Section("女声") {
+                                ForEach(DoubaoSpeaker.all.filter { $0.gender == .female }) { speaker in
+                                    Text(speaker.name).tag(speaker.id)
+                                }
+                            }
+                            Section("男声") {
+                                ForEach(DoubaoSpeaker.all.filter { $0.gender == .male }) { speaker in
+                                    Text(speaker.name).tag(speaker.id)
+                                }
+                            }
+                        }
+                        .onChange(of: speakerID) { _, value in
+                            var settings = VoiceSettings()
+                            settings.speakerID = value
+                        }
+                        HStack {
+                            Text("语速")
+                            Slider(value: $speechRate, in: 0.5...2.0, step: 0.05)
+                                .onChange(of: speechRate) { _, value in
+                                    var settings = VoiceSettings()
+                                    settings.speechRate = value
+                                }
+                            Text("×\(String(format: "%.2f", speechRate))")
+                                .monospacedDigit()
                         }
                     }
 
@@ -218,20 +249,25 @@ struct VoiceView: View {
         let template = templates.first { $0.action == .translate }
             ?? PromptTemplate.builtIns().first { $0.action == .translate }!
         let target = TextLanguage.detect(text).translationTarget
-        let parts = TextSegmenter.segments(for: text)
+        let parts = TextSegmenter.segments(for: text, maxChars: TextSegmenter.maxChars(for: profile))
         var partials = Array(repeating: "", count: parts.count)
+        let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve(profiles: profiles)
         let results = try await pipeline.translate(
             segments: parts,
             profile: profile,
             apiKey: apiKey,
             targetLanguage: target,
             template: template,
-            glossary: glossaryEntries
+            glossary: glossaryEntries,
+            tone: SettingsStore().translationTone,
+            fallbackProfile: fallback?.profile,
+            fallbackAPIKey: fallback?.apiKey
         ) { index, partial in
             partials[index] = partial
             translation = partials.joined(separator: "\n")
         }
         translation = results.map(\.translation).joined(separator: "\n")
+        let usage = pipeline.lastUsage
         modelContext.insert(TransformHistory(
             providerID: profile.id,
             sourceExcerpt: TextExcerpt.make(text),
@@ -240,13 +276,16 @@ struct VoiceView: View {
             model: profile.model,
             action: .translate,
             targetLanguage: target,
-            status: "success"
+            status: pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success",
+            promptTokens: usage["prompt_tokens"] ?? 0,
+            completionTokens: usage["completion_tokens"] ?? 0,
+            totalTokens: usage["total_tokens"] ?? 0
         ))
         try? modelContext.save()
         // Read the translation aloud. If TTS fails the text stays.
         if let config {
             do {
-                let audio = try await VolcanoTTSClient(config: config).synthesize(text: translation)
+                let audio = try await VolcanoTTSClient(config: config).synthesize(text: translation, speaker: speakerID, speechRate: speechRate)
                 lastAudio = audio
                 playTranslation()
             } catch {

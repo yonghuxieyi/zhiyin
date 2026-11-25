@@ -23,4 +23,15 @@ public final class SettingsStore {
         get { defaults.bool(forKey: "hasSeenGetStartedGuide") }
         set { defaults.set(newValue, forKey: "hasSeenGetStartedGuide") }
     }
+
+    /// Default translation tone (清单 4). The text screen can override
+    /// it per translation; voice/photo use this stored value.
+    public var translationTone: TranslationTone {
+        get {
+            guard let raw = defaults.string(forKey: "translationTone"),
+                  let tone = TranslationTone(rawValue: raw) else { return .default }
+            return tone
+        }
+        set { defaults.set(newValue.rawValue, forKey: "translationTone") }
+    }
 }

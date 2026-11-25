@@ -419,10 +419,13 @@ public actor VolcanoTTSClient {
         self.session = session
     }
 
-    /// Synthesizes `text` and returns the MP3 audio data.
-    public func synthesize(text: String) async throws -> Data {
+    /// Synthesizes `text` and returns the MP3 audio data. `speaker` is
+    /// any Doubao 2.0 voice id (see `DoubaoSpeaker`); `speechRate` is a
+    /// playback multiplier 0.5–2.0, mapped to the API's speech_rate int
+    /// [-50, 100] (0 = normal).
+    public func synthesize(text: String, speaker: String = defaultSpeaker, speechRate: Double = 1.0) async throws -> Data {
         guard config.isComplete else { throw VolcanoVoiceError.notConfigured }
-        let taskID = try await submit(text: text)
+        let taskID = try await submit(text: text, speaker: speaker, speechRate: speechRate)
         let audioURL = try await waitForAudio(taskID: taskID)
         guard let url = URL(string: audioURL) else { throw VolcanoVoiceError.invalidResponse }
         // The signed link expires in 1 hour; download it immediately.
@@ -431,7 +434,7 @@ public actor VolcanoTTSClient {
         return data
     }
 
-    private func submit(text: String) async throws -> String {
+    private func submit(text: String, speaker: String, speechRate: Double) async throws -> String {
         var request = URLRequest(url: URL(string: "https://openspeech.bytedance.com/api/v3/tts/submit")!)
         request.httpMethod = "POST"
         setAuthHeaders(&request)
@@ -442,8 +445,8 @@ public actor VolcanoTTSClient {
             "namespace": "BidirectionalTTS",
             "req_params": [
                 "text": text,
-                "speaker": Self.defaultSpeaker,
-                "audio_params": ["format": "mp3", "sample_rate": 24000, "speech_rate": 0, "loudness_rate": 0]
+                "speaker": speaker,
+                "audio_params": ["format": "mp3", "sample_rate": 24000, "speech_rate": VoiceSettings.speechRateParam(for: speechRate), "loudness_rate": 0]
             ]
         ]
         // NOTE: do not add an `additions` field (explicit_language): the

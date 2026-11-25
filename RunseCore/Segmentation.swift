@@ -12,6 +12,14 @@ public enum TextSegmenter {
     /// shorter segments translate more consistently and show progress.
     public static let defaultMaxChars = 800
 
+    /// Segment ceiling for a provider: Qwen-MT caps output at 8K tokens,
+    /// so its segments are capped at 1500 chars — clearly below the cap
+    /// even when the translation expands. Everything else uses the
+    /// default 800.
+    public static func maxChars(for profile: ProviderProfile) -> Int {
+        profile.isQwenMT ? QwenMT.maxSegmentChars : defaultMaxChars
+    }
+
     public static func segments(for text: String, maxChars: Int = defaultMaxChars) -> [String] {
         let paragraphs = text
             .components(separatedBy: .newlines)

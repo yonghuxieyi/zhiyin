@@ -35,10 +35,10 @@ final class RunseScreenshotUITests: XCTestCase {
         capture(app, name: "06-settings-guide")
 
         tap(app.buttons["guide.next"])
-        XCTAssertTrue(waitForAny(app, labels: ["Providers", "提供商"], timeout: 5))
-        capture(app, name: "07-providers")
+        XCTAssertTrue(waitForAny(app, labels: ["翻译"], timeout: 5))
+        capture(app, name: "07-translate")
 
-        tap(firstExisting(app, labels: ["Settings", "设置"]))
+        tap(firstExisting(app, labels: ["设置"]))
         capture(app, name: "08-settings")
     }
 

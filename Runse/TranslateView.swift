@@ -22,6 +22,9 @@ struct TranslateView: View {
     @State private var useGlossary = true
     @State private var showingGlossary = false
     @State private var extractedCandidates: [(term: String, count: Int)] = []
+    @State private var tone = SettingsStore().translationTone
+    @State private var fallbackUsed = false
+    @State private var savedVocabIDs: Set<UUID> = []
 
     private let settings = SettingsStore()
     private let pipeline = TranslationPipeline()
@@ -61,6 +64,18 @@ struct TranslateView: View {
                     Text("自动：中文翻英文，英文翻中文。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+
+                Section("语气") {
+                    Picker("语气", selection: $tone) {
+                        ForEach(TranslationTone.allCases) { tone in
+                            Text(tone.title).tag(tone)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: tone) { _, value in
+                        settings.translationTone = value
+                    }
                 }
 
                 Section("术语表") {
@@ -106,6 +121,12 @@ struct TranslateView: View {
                     ProgressView("正在翻译第 \(min(done + 1, max(segments.count, 1))) / \(max(segments.count, 1)) 段")
                 }
 
+                if fallbackUsed {
+                    Text("部分段落由 Qwen-MT 备用完成（DeepSeek 出错）。")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
+
                 if let errorMessage {
                     Text(errorMessage)
                         .foregroundStyle(.red)
@@ -129,6 +150,15 @@ struct TranslateView: View {
                                 } else {
                                     Text(row.translation)
                                         .font(.body)
+                                    Button {
+                                        modelContext.insert(VocabularyEntry(sourceText: row.source, translation: row.translation))
+                                        try? modelContext.save()
+                                        savedVocabIDs.insert(row.id)
+                                    } label: {
+                                        Label(savedVocabIDs.contains(row.id) ? "已收藏" : "收藏", systemImage: savedVocabIDs.contains(row.id) ? "bookmark.fill" : "bookmark")
+                                    }
+                                    .font(.caption)
+                                    .disabled(savedVocabIDs.contains(row.id))
                                 }
                                 if let error = row.error {
                                     Text(error)
@@ -173,6 +203,8 @@ struct TranslateView: View {
         isTranslating = true
         errorMessage = nil
         didCopy = false
+        fallbackUsed = false
+        savedVocabIDs = []
         defer { isTranslating = false }
         do {
             guard let profile = selectedProfile() else { throw LLMProviderError.invalidURL }
@@ -181,17 +213,22 @@ struct TranslateView: View {
             guard let apiKey, !apiKey.isEmpty else { throw LLMProviderError.missingAPIKey }
             let template = templates.first { $0.action == .translate }
                 ?? PromptTemplate.builtIns().first { $0.action == .translate }!
-            let parts = TextSegmenter.segments(for: inputText)
+            let parts = TextSegmenter.segments(for: inputText, maxChars: TextSegmenter.maxChars(for: profile))
             segments = parts.map { SegmentRow(source: $0) }
             if extractedCandidates.isEmpty { extractTerms() }
             let glossary = useGlossary ? glossaryEntries : []
+            // Qwen-MT backup: only when the primary is not Qwen-MT itself.
+            let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve(profiles: profiles)
             let results = try await pipeline.translate(
                 segments: parts,
                 profile: profile,
                 apiKey: apiKey,
                 targetLanguage: targetLanguage,
                 template: template,
-                glossary: glossary
+                glossary: glossary,
+                tone: tone,
+                fallbackProfile: fallback?.profile,
+                fallbackAPIKey: fallback?.apiKey
             ) { index, partial in
                 segments[index].translation = partial
                 segments[index].isTranslating = true
@@ -201,6 +238,8 @@ struct TranslateView: View {
                 segments[index].isTranslating = false
                 segments[index].isDone = true
             }
+            fallbackUsed = pipeline.lastFallbackUsed
+            let usage = pipeline.lastUsage
             modelContext.insert(TransformHistory(
                 providerID: profile.id,
                 sourceExcerpt: TextExcerpt.make(inputText),
@@ -209,7 +248,10 @@ struct TranslateView: View {
                 model: profile.model,
                 action: .translate,
                 targetLanguage: targetLanguage,
-                status: "success"
+                status: pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success",
+                promptTokens: usage["prompt_tokens"] ?? 0,
+                completionTokens: usage["completion_tokens"] ?? 0,
+                totalTokens: usage["total_tokens"] ?? 0
             ))
             try? modelContext.save()
         } catch {

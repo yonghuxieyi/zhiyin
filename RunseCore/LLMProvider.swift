@@ -1,19 +1,40 @@
 import Foundation
 import SwiftAnthropic
 
+/// One glossary term, used to give a specialist model (Qwen-MT)
+/// server-side term intervention via `translation_options.terms`.
+public struct GlossaryTerm: Sendable, Equatable {
+    public var source: String
+    public var target: String
+
+    public init(source: String, target: String) {
+        self.source = source
+        self.target = target
+    }
+}
+
 public struct LLMRequest: Sendable, Equatable {
     public var action: TransformAction
     public var model: String
     public var systemPrompt: String
     public var userPrompt: String
     public var temperature: Double
+    /// Target language in the app's terms ("中文" or "English").
+    /// Only Qwen-MT needs it as a separate field; other providers read
+    /// it from the user prompt.
+    public var targetLanguage: String
+    /// Filled glossary terms, for providers that support server-side
+    /// term intervention (Qwen-MT). Empty for other providers.
+    public var glossaryTerms: [GlossaryTerm]
 
-    public init(action: TransformAction, model: String, systemPrompt: String, userPrompt: String, temperature: Double = 0.2) {
+    public init(action: TransformAction, model: String, systemPrompt: String, userPrompt: String, temperature: Double = 0.2, targetLanguage: String = "English", glossaryTerms: [GlossaryTerm] = []) {
         self.action = action
         self.model = model
         self.systemPrompt = systemPrompt
         self.userPrompt = userPrompt
         self.temperature = temperature
+        self.targetLanguage = targetLanguage
+        self.glossaryTerms = glossaryTerms
     }
 }
 
@@ -392,6 +413,29 @@ public enum ProviderRequestFactory {
                 "temperature": request.temperature
             ]
         case .openAICompatible:
+            // Qwen-MT (DashScope) has a strict shape: exactly ONE user
+            // message with the text, no system message, and the language
+            // pair plus glossary terms in `extra_body.translation_options`.
+            // Temperature is left out: Qwen-MT is a specialist model and
+            // the docs do not list it as a supported parameter.
+            if profile.isQwenMT {
+                var options: [String: Any] = [
+                    "source_lang": "auto",
+                    "target_lang": QwenMT.languageCode(for: request.targetLanguage)
+                ]
+                if !request.glossaryTerms.isEmpty {
+                    options["terms"] = request.glossaryTerms.map {
+                        ["source": $0.source, "target": $0.target]
+                    }
+                }
+                return [
+                    "model": request.model,
+                    "messages": [
+                        ["role": "user", "content": request.userPrompt]
+                    ],
+                    "extra_body": ["translation_options": options]
+                ]
+            }
             var openAIBody: [String: Any] = [
                 "model": request.model,
                 "messages": [

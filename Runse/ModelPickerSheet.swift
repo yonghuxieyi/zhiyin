@@ -12,6 +12,7 @@ struct ModelPickerSheet: View {
 
     @StateObject private var connectivity = ConnectivityMonitor()
     @State private var voiceConfigured = false
+    @State private var qwenConfigured = false
     @State private var searchText = ""
 
     private let settings = SettingsStore()
@@ -52,12 +53,13 @@ struct ModelPickerSheet: View {
             .task {
                 let config = await VolcanoVoiceStore.load()
                 voiceConfigured = config != nil
+                qwenConfigured = await DashScopeStore.hasKey()
             }
         }
     }
 
     private func filteredOptions(for group: ModelGroup) -> [ModelOption] {
-        let options = ModelCatalog.options(voiceConfigured: voiceConfigured)
+        let options = ModelCatalog.options(voiceConfigured: voiceConfigured, qwenConfigured: qwenConfigured)
             .filter { $0.group == group }
         guard !searchText.isEmpty else { return options }
         return options.filter {

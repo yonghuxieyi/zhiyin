@@ -124,6 +124,39 @@ public enum OutputLength: String, Codable, CaseIterable, Identifiable, Sendable 
             isDefault: false
         )
     }
+
+    /// Qwen-MT Flash backup: used automatically when DeepSeek fails
+    /// for a segment (requires a saved DashScope key). Seeded once by
+    /// Bootstrap. Flash is the default backup; Plus is the higher
+    /// quality, more natural variant. Which tone fits the user best
+    /// is decided by a blind test once a DashScope key is available.
+    public static func qwenMTFlash() -> ProviderProfile {
+        ProviderProfile(
+            id: QwenMT.flashProfileID,
+            name: "Qwen-MT 备用",
+            kind: .openAICompatible,
+            baseURL: QwenMT.baseURL,
+            chatEndpoint: "/chat/completions",
+            model: QwenMT.flashModel,
+            isDefault: false
+        )
+    }
+
+    public static func qwenMTPlus() -> ProviderProfile {
+        ProviderProfile(
+            id: QwenMT.plusProfileID,
+            name: "Qwen-MT Plus",
+            kind: .openAICompatible,
+            baseURL: QwenMT.baseURL,
+            chatEndpoint: "/chat/completions",
+            model: QwenMT.plusModel,
+            isDefault: false
+        )
+    }
+
+    public var isQwenMT: Bool {
+        model.hasPrefix("qwen-mt")
+    }
 }
 
 @Model public final class PromptTemplate {
@@ -224,5 +257,27 @@ public enum OutputLength: String, Codable, CaseIterable, Identifiable, Sendable 
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.totalTokens = totalTokens
+    }
+}
+
+/// A saved sentence or term from a translation (清单 5): the user taps
+/// "收藏" on a translated segment and can look it up later in the
+/// 生词本. The schema is registered in Bootstrap.
+@Model public final class VocabularyEntry {
+    @Attribute(.unique) public var id: String
+    public var sourceText: String
+    public var translation: String
+    public var createdAt: Date
+
+    public init(
+        id: String = UUID().uuidString,
+        sourceText: String,
+        translation: String,
+        createdAt: Date = .now
+    ) {
+        self.id = id
+        self.sourceText = sourceText
+        self.translation = translation
+        self.createdAt = createdAt
     }
 }

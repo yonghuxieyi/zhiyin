@@ -3,7 +3,7 @@ import SwiftData
 
 public enum Bootstrap {
     public static func modelContainer(inMemory: Bool = false) throws -> ModelContainer {
-        let schema = Schema([ProviderProfile.self, PromptTemplate.self, TransformHistory.self, GlossaryEntry.self, InterpretationSession.self, InterpretationSegmentRecord.self])
+        let schema = Schema([ProviderProfile.self, PromptTemplate.self, TransformHistory.self, GlossaryEntry.self, InterpretationSession.self, InterpretationSegmentRecord.self, VocabularyEntry.self])
         let configuration: ModelConfiguration
         if inMemory {
             configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
@@ -40,6 +40,19 @@ public enum Bootstrap {
         proDescriptor.fetchLimit = 1
         if try context.fetch(proDescriptor).first == nil {
             context.insert(ProviderProfile.defaultDeepSeekPro())
+        }
+
+        // Qwen-MT backup profiles (清单 2). Inserted once if missing;
+        // never overwritten. They only become active when the user saves
+        // a DashScope key in Settings.
+        for factory in [ProviderProfile.qwenMTFlash, ProviderProfile.qwenMTPlus] {
+            let qwenProfile = factory()
+            let qwenID = qwenProfile.id
+            var qwenDescriptor = FetchDescriptor<ProviderProfile>(predicate: #Predicate { $0.id == qwenID })
+            qwenDescriptor.fetchLimit = 1
+            if try context.fetch(qwenDescriptor).first == nil {
+                context.insert(qwenProfile)
+            }
         }
 
         for template in PromptTemplate.builtIns() {

@@ -65,9 +65,10 @@ public enum ModelCatalog {
     public static let deepSeekFlashID = "deepseek-flash-1"
     public static let deepSeekProID = "deepseek-pro-1"
 
-    /// All options, grouped. Voice availability is filled in by the UI
-    /// from the keychain (configured or not); everything else is static.
-    public static func options(voiceConfigured: Bool) -> [ModelOption] {
+    /// All options, grouped. Voice and Qwen-MT availability are filled
+    /// in by the UI from the keychain (configured or not); everything
+    /// else is static.
+    public static func options(voiceConfigured: Bool, qwenConfigured: Bool = false) -> [ModelOption] {
         [
             ModelOption(
                 id: deepSeekFlashID,
@@ -84,6 +85,22 @@ public enum ModelCatalog {
                 group: .cloudChina,
                 profileID: RunseConstants.deepSeekProProfileID,
                 status: .available
+            ),
+            ModelOption(
+                id: QwenMT.flashProfileID,
+                name: "Qwen-MT 备用",
+                detail: "qwen-mt-flash · DeepSeek 挂了它顶上",
+                group: .cloudChina,
+                profileID: QwenMT.flashProfileID,
+                status: qwenConfigured ? .available : .needsKey("需要配置 DashScope Key")
+            ),
+            ModelOption(
+                id: QwenMT.plusProfileID,
+                name: "Qwen-MT Plus",
+                detail: "qwen-mt-plus · 更自然，专业文档",
+                group: .cloudChina,
+                profileID: QwenMT.plusProfileID,
+                status: qwenConfigured ? .available : .needsKey("需要配置 DashScope Key")
             ),
             ModelOption(
                 id: "qwen-4b-offline",
@@ -116,8 +133,8 @@ public enum ModelCatalog {
         ]
     }
 
-    public static func option(id: String, voiceConfigured: Bool) -> ModelOption? {
-        options(voiceConfigured: voiceConfigured).first { $0.id == id }
+    public static func option(id: String, voiceConfigured: Bool, qwenConfigured: Bool = false) -> ModelOption? {
+        options(voiceConfigured: voiceConfigured, qwenConfigured: qwenConfigured).first { $0.id == id }
     }
 }
 
