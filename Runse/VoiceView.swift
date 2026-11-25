@@ -11,6 +11,7 @@ struct VoiceView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \ProviderProfile.name) private var profiles: [ProviderProfile]
     @Query(sort: \PromptTemplate.name) private var templates: [PromptTemplate]
+    @Query(sort: \GlossaryEntry.sourceTerm) private var glossaryEntries: [GlossaryEntry]
 
     @State private var config: VolcanoVoiceConfig?
     @State private var configChecked = false
@@ -225,7 +226,7 @@ struct VoiceView: View {
             apiKey: apiKey,
             targetLanguage: target,
             template: template,
-            glossary: []
+            glossary: glossaryEntries
         ) { index, partial in
             partials[index] = partial
             translation = partials.joined(separator: "\n")

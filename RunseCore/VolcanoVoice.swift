@@ -4,17 +4,29 @@ import Foundation
 /// Doubao voice (Volcano engine) streaming ASR 2.0 and TTS 2.0.
 ///
 /// - ASR (streaming recognition): WebSocket binary protocol, per the
-///   Volcano "豆包语音" docs: `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel`,
-///   auth headers `X-Api-App-Key` (AppID), `X-Api-Access-Key` (Access
-///   Token), `X-Api-Resource-Id: volc.seedasr.sauc.duration`,
-///   `X-Api-Request-Id` (UUID), `X-Api-Sequence: -1`. Binary frames:
-///   byte 0 `0x11` (protocol v1, 4-byte header), byte 1 message type
-///   (0x1 full client request, 0x2 audio only, 0x9 full server response,
-///   0xF server error) plus flags, byte 2 serialization (0 raw, 1 JSON)
-///   plus compression, byte 3 reserved, then a 4-byte big-endian payload
-///   size and payload. The ASR path is written from the docs and has not
-///   been live-tested yet (no Access Token retrieved); treat the first
-///   live call as the real test.
+///   Volcano "豆包语音" docs. Verified live 2026-11-25 from this VM:
+///   the endpoint is `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async`
+///   (the optimized bidirectional stream), resource
+///   `volc.seedasr.sauc.duration`, auth headers `X-Api-App-Key` (AppID),
+///   `X-Api-Access-Key` (Access Token), `X-Api-Resource-Id`,
+///   `X-Api-Request-Id` (UUID), `X-Api-Sequence: -1`. Do NOT use
+///   `/api/v3/sauc/bigmodel` with the 2.0 resource: the gateway rejects
+///   it with 400 "resourceId volc.seedasr.sauc.duration is not allowed"
+///   (that endpoint only takes the 1.0 resource `volc.bigasr.sauc.duration`).
+///   Binary frames: byte 0 `0x11` (protocol v1, 4-byte header), byte 1
+///   message type (0x1 full client request, 0x2 audio only, 0x9 full
+///   server response, 0xF server error) plus flags, byte 2 serialization
+///   (0 raw, 1 JSON) plus compression, byte 3 reserved, then an optional
+///   4-byte big-endian sequence number when flags bit 0x1 is set (the
+///   server sets it on every result frame), then a 4-byte big-endian
+///   payload size and payload. Results are cumulative: each message
+///   carries the full text so far, with `utterances` (each has `text`,
+///   `start_time`, `end_time`, `definite`, `words`) and a `prefetch` flag
+///   on re-recognition passes. An utterance is final when its `definite`
+///   is true; the server sends no explicit session-final message, so
+///   `finish()` falls back to the last transcript after 8s. Live test:
+///   8s of TTS-generated Chinese recognized exactly, first partial at
+///   ~0.5s of audio, word-level timestamps included.
 /// - TTS (synthesis): V3 ASYNC API, verified working 2026-11-25. Do NOT
 ///   use the V1 endpoint (`POST /api/v1/tts`, resource `volc.tts`):
 ///   this app has no grant for it and it returns 401 "load grant:
@@ -131,18 +143,25 @@ public enum VolcanoFrame {
         public var flags: UInt8
         public var isJSON: Bool
         public var event: Int32?
+        /// Server sequence number, present when flags bit 0x1 is set.
+        public var sequence: UInt32?
         public var payload: Data
     }
 
     /// Decodes the first complete frame in `buffer`, returning it and the
     /// number of bytes consumed, or nil when the buffer holds no complete
-    /// frame yet.
+    /// frame yet. Server result frames carry a 4-byte big-endian sequence
+    /// number after the header when flags bit 0x1 is set (verified live
+    /// 2026-11-25 on the ASR bigmodel_async endpoint); the sequence is
+    /// returned for logging and skipped for the payload.
     public static func decodeFirst(from buffer: Data) -> (frame: DecodedFrame, consumed: Int)? {
         guard buffer.count >= 4 else { return nil }
         let headerSize = Int(buffer[0] & 0x0F) * 4
-        guard buffer.count >= headerSize + 4 else { return nil }
-        let type = buffer[1] >> 4
         let flags = buffer[1] & 0x0F
+        let hasSequence = (flags & 0x1) != 0
+        let sizeOffset = headerSize + (hasSequence ? 4 : 0)
+        guard buffer.count >= sizeOffset + 4 else { return nil }
+        let type = buffer[1] >> 4
         let isJSON = (buffer[2] >> 4) == 0x1
         var event: Int32?
         if headerSize >= 8 {
@@ -150,13 +169,19 @@ public enum VolcanoFrame {
             _ = withUnsafeMutableBytes(of: &raw) { buffer.copyBytes(to: $0, from: 4..<8) }
             event = Int32(bigEndian: raw)
         }
+        var sequence: UInt32?
+        if hasSequence {
+            var raw: UInt32 = 0
+            _ = withUnsafeMutableBytes(of: &raw) { buffer.copyBytes(to: $0, from: headerSize..<(headerSize + 4)) }
+            sequence = UInt32(bigEndian: raw)
+        }
         var size: UInt32 = 0
-        _ = withUnsafeMutableBytes(of: &size) { buffer.copyBytes(to: $0, from: headerSize..<(headerSize + 4)) }
+        _ = withUnsafeMutableBytes(of: &size) { buffer.copyBytes(to: $0, from: sizeOffset..<(sizeOffset + 4)) }
         let payloadSize = Int(UInt32(bigEndian: size))
-        let total = headerSize + 4 + payloadSize
+        let total = sizeOffset + 4 + payloadSize
         guard buffer.count >= total else { return nil }
-        let payload = buffer.subdata(in: (headerSize + 4)..<total)
-        return (DecodedFrame(type: type, flags: flags, isJSON: isJSON, event: event, payload: payload), total)
+        let payload = buffer.subdata(in: (sizeOffset + 4)..<total)
+        return (DecodedFrame(type: type, flags: flags, isJSON: isJSON, event: event, sequence: sequence, payload: payload), total)
     }
 }
 
@@ -226,7 +251,7 @@ public actor VolcanoASRClient {
     /// transcript updates (partial while speaking, final at the end).
     public func start() async throws -> AsyncStream<(String, Bool)> {
         guard config.isComplete else { throw VolcanoVoiceError.notConfigured }
-        var request = URLRequest(url: URL(string: "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel")!)
+        var request = URLRequest(url: URL(string: "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async")!)
         request.setValue(config.appID, forHTTPHeaderField: "X-Api-App-Key")
         request.setValue(config.accessToken, forHTTPHeaderField: "X-Api-Access-Key")
         request.setValue("volc.seedasr.sauc.duration", forHTTPHeaderField: "X-Api-Resource-Id")
@@ -255,8 +280,9 @@ public actor VolcanoASRClient {
     }
 
     /// Stops sending audio and waits for the final transcript (up to 8s).
-    /// With VAD segmentation the server emits final results per utterance
-    /// on its own; closing the socket is the end signal.
+    /// With VAD segmentation the server marks utterances definite on its
+    /// own; it sends no explicit session-final message, so after 8s the
+    /// last transcript is returned as-is.
     public func finish() async throws -> String {
         if isFinal { return transcript }
         return try await withCheckedThrowingContinuation { continuation in
@@ -301,6 +327,25 @@ public actor VolcanoASRClient {
         ]
     }
 
+    /// Pure parser for one ASR server result object (the `result` dict of
+    /// a type-0x9 frame), extracted so the cumulative-text / definite /
+    /// prefetch rules are unit-testable. Returns nil for messages that
+    /// carry no usable transcript (e.g. the session ack, which only has
+    /// `additions.log_id`). Rules, verified against live traffic
+    /// 2026-11-25: text is cumulative (each message holds the full text
+    /// so far); an utterance is final when its `definite` is true; a
+    /// `prefetch` message is the server's re-recognition pass and is
+    /// never final; there is no explicit session-final message.
+    public static func parseASRResult(_ result: [String: Any]) -> (text: String, isFinal: Bool)? {
+        let text = result["text"] as? String ?? ""
+        let utterances = result["utterances"] as? [[String: Any]] ?? []
+        let isPrefetch = (result["prefetch"] as? Bool) ?? false
+        let definite = !utterances.isEmpty && utterances.allSatisfy { ($0["definite"] as? Bool) == true }
+        let isFinal = !isPrefetch && ((result["is_final"] as? Bool) ?? definite)
+        guard !text.isEmpty || isFinal else { return nil }
+        return (text, isFinal)
+    }
+
     private func receiveLoop() async {
         guard let reader else { return }
         while let frame = await reader.nextFrame() {
@@ -327,15 +372,12 @@ public actor VolcanoASRClient {
                 }
                 return
             }
-            guard let result = object["result"] as? [String: Any] else { continue }
-            let text = result["text"] as? String ?? ""
-            let definite = (result["utterances"] as? [[String: Any]])?.allSatisfy { ($0["definite"] as? Bool) == true } ?? false
-            let final = (result["is_final"] as? Bool) ?? (object["is_final"] as? Bool) ?? definite
-            if !text.isEmpty || final {
-                transcript = text
-                isFinal = final
-                streamContinuation?.yield((text, final))
-            }
+            guard let result = object["result"] as? [String: Any],
+                  let update = Self.parseASRResult(result) else { continue }
+            let (text, final) = update
+            transcript = text
+            isFinal = final
+            streamContinuation?.yield((text, final))
             if final, let continuation = finalContinuation {
                 finalContinuation = nil
                 continuation.resume(returning: text)

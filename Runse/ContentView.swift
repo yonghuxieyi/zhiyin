@@ -15,6 +15,9 @@ struct ContentView: View {
             VoiceView()
                 .tabItem { Label("语音", systemImage: "mic") }
                 .tag(Tab.voice)
+            InterpretationView()
+                .tabItem { Label("同传", systemImage: "bubble.left.and.bubble.right") }
+                .tag(Tab.interpret)
             PhotoView()
                 .tabItem { Label("拍照", systemImage: "camera") }
                 .tag(Tab.photo)
@@ -51,7 +54,7 @@ struct ContentView: View {
     }
 
     enum Tab {
-        case translate, voice, photo, tryIt, providers, prompts, settings, history
+        case translate, voice, interpret, photo, tryIt, providers, prompts, settings, history
     }
 }
 

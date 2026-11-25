@@ -1,0 +1,455 @@
+import RunseCore
+import SwiftData
+import SwiftUI
+
+/// Simultaneous interpretation: its own page. Live subtitles in both
+/// languages side by side, pause / review / save, quota and latency
+/// in plain sight. When the live path is down the page keeps working
+/// on the sequential line and says so, with a retry button.
+struct InterpretationView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \ProviderProfile.name) private var profiles: [ProviderProfile]
+    @Query(sort: \PromptTemplate.name) private var templates: [PromptTemplate]
+    @Query(sort: \GlossaryEntry.sourceTerm) private var glossaryEntries: [GlossaryEntry]
+    @Query(sort: \InterpretationSession.startedAt, order: .reverse) private var pastSessions: [InterpretationSession]
+
+    @StateObject private var engine = InterpretationEngine()
+    @State private var config: VolcanoVoiceConfig?
+    @State private var configChecked = false
+    @State private var direction: InterpretationEngine.Direction = .zhToEn
+    @State private var selectedSession: InterpretationSession?
+
+    private var isRunning: Bool {
+        engine.phase == .live || engine.phase == .fallback || engine.phase == .paused || engine.phase == .connecting
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !configChecked {
+                    Section { ProgressView("正在检查语音配置") }
+                } else if config == nil {
+                    Section("语音未配置") {
+                        Text("同传走火山豆包语音。AppID 和 Access Token 在“语音”页填一次，只存手机钥匙串。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    controlSection
+                    statusSection
+                    quotaSection
+                    latencySection
+                    transcriptSection
+                }
+
+                if !pastSessions.isEmpty {
+                    Section("往期同传") {
+                        ForEach(pastSessions) { session in
+                            Button {
+                                selectedSession = session
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Text(session.startedAt, style: .date)
+                                        Text(session.startedAt, style: .time)
+                                        Spacer()
+                                        Text(session.directionTitle)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Text("\(session.segments.count) 句 · \(session.modeTitle) · \(Int(session.durationSeconds))秒")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .onDelete { offsets in
+                            for offset in offsets {
+                                modelContext.delete(pastSessions[offset])
+                            }
+                            try? modelContext.save()
+                        }
+                    }
+                }
+            }
+            .navigationTitle("同传")
+            .task {
+                config = await VolcanoVoiceStore.load()
+                configChecked = true
+            }
+            .sheet(item: $selectedSession) { session in
+                InterpretationSessionDetailView(session: session)
+            }
+        }
+    }
+
+    // MARK: - Controls
+
+    private var controlSection: some View {
+        Section("同传") {
+            Picker("方向", selection: $direction) {
+                ForEach(InterpretationEngine.Direction.allCases, id: \.self) { dir in
+                    Text(dir.title).tag(dir)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(isRunning)
+
+            HStack {
+                if !isRunning {
+                    Button {
+                        Task { await startSession() }
+                    } label: {
+                        Label("开始同传", systemImage: "mic")
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else if engine.isPaused {
+                    Button {
+                        Task { await engine.resume() }
+                    } label: {
+                        Label("继续", systemImage: "play")
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Button {
+                        engine.pause()
+                    } label: {
+                        Label("暂停", systemImage: "pause")
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                if isRunning {
+                    Button {
+                        Task { await stopSession() }
+                    } label: {
+                        Label("结束并保存", systemImage: "stop")
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+
+            if direction == .both && isRunning {
+                Picker("锁定方向", selection: Binding(
+                    get: { engine.lockedDirection },
+                    set: { newValue in Task { await engine.lockDirection(newValue) } }
+                )) {
+                    Text("自动").tag(nil as InterpretationEngine.Direction?)
+                    Text("中文 → 英文").tag(InterpretationEngine.Direction.zhToEn as InterpretationEngine.Direction?)
+                    Text("英文 → 中文").tag(InterpretationEngine.Direction.enToZh as InterpretationEngine.Direction?)
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Text("左耳原声，右耳译音。说一句话就翻一句；对方说错了自己纠正重说，能跟上改过来。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - Status
+
+    private var statusSection: some View {
+        Section("状态") {
+            HStack {
+                Text("模式")
+                Spacer()
+                Text(modeTitle)
+                    .foregroundStyle(engine.mode == .live ? .green : .orange)
+            }
+
+            if engine.grantPending {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("同声传译还没开通")
+                        .font(.headline)
+                        .foregroundStyle(.orange)
+                    Text("火山语音控制台 → 语音技术 → 应用管理 → Zhiyin 应用 → 接入能力，勾上“豆包同声传译大模型”，保存后回来点“切回实时同传”。现在先用顺序语音线，功能不受影响。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if engine.mode == .fallback, let reason = engine.fallbackReason {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("已退回顺序语音线")
+                        .font(.headline)
+                        .foregroundStyle(.orange)
+                    Text("原因：\(reason)。识别 → 翻译 → 合成照常进行，不会卡死；30 秒后自动试一次切回，失败就留在这条线上。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("切回实时同传") {
+                        Task { await engine.retryLive() }
+                    }
+                }
+            }
+
+            if let errorMessage = engine.errorMessage {
+                Text(errorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private var modeTitle: String {
+        switch engine.phase {
+        case .idle: "未开始"
+        case .connecting: "连接中…"
+        case .live: "实时同传"
+        case .fallback: "顺序语音线"
+        case .paused: "已暂停"
+        case .stopped: "已结束"
+        case .error: "出错"
+        }
+    }
+
+    // MARK: - Quota
+
+    private var quotaSection: some View {
+        Section("额度") {
+            let quota = engine.quota
+            HStack {
+                Text("今日同传")
+                Spacer()
+                Text("\(quota.liveSessionsToday)/\(InterpretationQuotaStore.liveSessionsFreePerDay) 次")
+                    .foregroundStyle(quota.liveSessionsWarning ? .orange : .primary)
+            }
+            HStack {
+                Text("今日同传用时")
+                Spacer()
+                Text(String(format: "%.1f 分钟", quota.liveMinutesToday))
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("识别试用剩")
+                Spacer()
+                Text(String(format: "%.1f 小时", quota.asrMinutesRemaining / 60.0))
+                    .foregroundStyle(quota.asrWarning ? .orange : .secondary)
+            }
+            HStack {
+                Text("合成试用剩")
+                Spacer()
+                Text("\(quota.ttsCharsRemaining) 字")
+                    .foregroundStyle(quota.ttsWarning ? .orange : .secondary)
+            }
+            HStack {
+                Text("账户余额")
+                Spacer()
+                if let balance = quota.balanceYuan {
+                    Text("¥\(String(format: "%.2f", balance))")
+                        .foregroundStyle(balance < 5 ? .orange : .secondary)
+                } else {
+                    Text("¥2.36（2026-11-25 记录）")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text("识别 20 小时、合成 20000 字试用到 2027-05-25；超量按量后付费，余额不足会停。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - Latency
+
+    private var latencySection: some View {
+        Section("延迟") {
+            HStack {
+                Text("目标 / 上限")
+                Spacer()
+                Text("2.5 秒 / 3 秒")
+                    .foregroundStyle(.secondary)
+            }
+            if let latency = engine.latency {
+                if let firstText = latency.firstTranslationTextMs {
+                    HStack {
+                        Text("首句译文")
+                        Spacer()
+                        Text(String(format: "%.0f 毫秒", firstText))
+                            .foregroundStyle(firstText <= LatencyBudget.targetMs ? .green : .orange)
+                    }
+                }
+                if let firstAudio = latency.firstTTSAudioMs {
+                    HStack {
+                        Text("首句语音")
+                        Spacer()
+                        Text(String(format: "%.0f 毫秒", firstAudio))
+                            .foregroundStyle(firstAudio <= LatencyBudget.limitMs ? .green : .orange)
+                    }
+                }
+            } else {
+                Text("还没实测数字：服务端 S2S 标称 2.53 秒（文档值），加播放缓冲约 2.7 秒，在 3 秒上限内、略高于 2.5 秒目标；第一句出来后这里显示实测值。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Transcript
+
+    private var transcriptSection: some View {
+        Section("对照") {
+            if engine.segments.isEmpty && engine.liveDraftSource.isEmpty && engine.liveDraftTranslation.isEmpty {
+                Text("开始后原文和译文对照着出现在这里；能暂停、能回看，结束后存下来。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(engine.segments) { segment in
+                VStack(alignment: .leading, spacing: 6) {
+                    if segment.speakerChanged {
+                        Label("换人", systemImage: "person.2")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    if !segment.sourceText.isEmpty {
+                        Text(segment.sourceText)
+                            .font(.body)
+                    }
+                    if !segment.translationText.isEmpty {
+                        Text(segment.translationText)
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 8) {
+                        Text(segment.mode == .live ? "实时" : "顺序")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(segment.mode == .live ? Color.green.opacity(0.15) : Color.orange.opacity(0.15), in: Capsule())
+                        if let latencyMs = segment.latencyMs {
+                            Text(String(format: "%.0f 毫秒", latencyMs))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            if !engine.liveDraftSource.isEmpty || !engine.liveDraftTranslation.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    if !engine.liveDraftSource.isEmpty {
+                        Text(engine.liveDraftSource)
+                            .font(.body)
+                            .foregroundStyle(.primary.opacity(0.6))
+                    }
+                    if !engine.liveDraftTranslation.isEmpty {
+                        Text(engine.liveDraftTranslation)
+                            .font(.body)
+                            .foregroundStyle(.secondary.opacity(0.6))
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    private func startSession() async {
+        guard let config else { return }
+        let glossary = GlossaryAST.glossaryList(from: glossaryEntries)
+        let translator: InterpretationEngine.Translator = { text, source, target, note in
+            guard let profile = profiles.first(where: \.isDefault) ?? profiles.first else {
+                throw LLMProviderError.invalidURL
+            }
+            let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
+            let apiKey = try await keychain.load(service: KeychainStore.providerAPIKeyService, account: profile.id)
+            guard let apiKey, !apiKey.isEmpty else { throw LLMProviderError.missingAPIKey }
+            let template = templates.first { $0.action == .translate }
+                ?? PromptTemplate.builtIns().first { $0.action == .translate }!
+            let targetLanguage = target == .en ? "English" : "中文"
+            let results = try await TranslationPipeline().translate(
+                segments: [text],
+                profile: profile,
+                apiKey: apiKey,
+                targetLanguage: targetLanguage,
+                template: template,
+                glossary: glossaryEntries,
+                customInstruction: note
+            ) { _, _ in }
+            return results.first?.translation ?? ""
+        }
+        let speaker: InterpretationEngine.Speaker = { text in
+            guard let config else { throw VolcanoVoiceError.notConfigured }
+            return try await VolcanoTTSClient(config: config).synthesize(text: text)
+        }
+        await engine.start(
+            direction: direction,
+            config: config,
+            glossary: glossary,
+            translator: translator,
+            speaker: speaker
+        )
+    }
+
+    private func stopSession() async {
+        let record = await engine.stop()
+        guard !record.segments.isEmpty else { return }
+        modelContext.insert(InterpretationSession(record: record))
+        try? modelContext.save()
+    }
+}
+
+struct InterpretationSessionDetailView: View {
+    @Environment(\.dismiss) private var dismiss
+    let session: InterpretationSession
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack {
+                        Text("方向")
+                        Spacer()
+                        Text(session.directionTitle).foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("模式")
+                        Spacer()
+                        Text(session.modeTitle).foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("时长")
+                        Spacer()
+                        Text("\(Int(session.durationSeconds)) 秒").foregroundStyle(.secondary)
+                    }
+                    if let latencyMs = session.latencyMs {
+                        HStack {
+                            Text("首句语音延迟")
+                            Spacer()
+                            Text(String(format: "%.0f 毫秒", latencyMs)).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Section("对照") {
+                    ForEach(session.segments.sorted(by: { $0.createdAt < $1.createdAt })) { segment in
+                        VStack(alignment: .leading, spacing: 6) {
+                            if segment.speakerChanged {
+                                Label("换人", systemImage: "person.2")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            if !segment.sourceText.isEmpty {
+                                Text(segment.sourceText)
+                            }
+                            if !segment.translationText.isEmpty {
+                                Text(segment.translationText)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+            .navigationTitle("\(session.startedAt, style: .date)")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    ShareLink(item: session.exportedText()) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+        }
+    }
+}

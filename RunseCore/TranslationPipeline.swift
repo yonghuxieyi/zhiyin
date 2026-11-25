@@ -16,6 +16,9 @@ public final class TranslationPipeline {
     /// Translates `segments` in order. `onSegmentUpdate` fires with the
     /// segment index and its current partial translation as chunks stream
     /// in. Returns the finished translations in segment order.
+    /// `customInstruction` lands in the template's Instruction line
+    /// (not in the text to translate); the interpretation fallback
+    /// uses it to re-ask with missed glossary terms spelled out.
     @MainActor public func translate(
         segments: [String],
         profile: ProviderProfile,
@@ -23,6 +26,7 @@ public final class TranslationPipeline {
         targetLanguage: String,
         template: PromptTemplate,
         glossary: [GlossaryEntry],
+        customInstruction: String = "",
         onSegmentUpdate: @escaping (Int, String) -> Void
     ) async throws -> [SegmentResult] {
         let client = HTTPProviderClient(profile: profile, apiKey: apiKey)
@@ -33,7 +37,7 @@ public final class TranslationPipeline {
                 selectedText: segment,
                 action: .translate,
                 targetLanguage: targetLanguage,
-                customInstruction: ""
+                customInstruction: customInstruction
             )
             var prompt = PromptRenderer.render(template: template, context: context)
             if !glossaryBlock.isEmpty {
