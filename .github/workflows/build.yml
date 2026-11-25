@@ -1,0 +1,81 @@
+# 智音 CI: build the app unsigned and run the offline unit tests.
+#
+# Notes:
+# - Sophon needs swift-tools 6.2, so the runner must carry Xcode 26
+#   (Xcode 16 cannot build it). `macos-26` ships Xcode 26.
+# - macOS runner minutes bill at 10x the Linux rate, so this workflow
+#   stays minimal: one build, one offline test run, one IPA artifact.
+# - Live/network tests are skipped: PinyinLiveTests needs a DeepSeek key,
+#   and the UI tests need one too (see ZHIYIN_TEST_API_KEY /
+#   /tmp/zhiyin-deepseek.key in those tests).
+# - The IPA is built for a generic iOS device (not the simulator), so the
+#   unsigned .app inside is installable on a real phone via SideStore.
+#   It is unsigned on purpose: signing happens on the phone with the
+#   owner's own Apple ID.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: |
+          XCODE26=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | head -n 1)
+          if [ -n "$XCODE26" ]; then
+            sudo xcode-select -s "$XCODE26/Contents/Developer"
+          fi
+          xcodebuild -version
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build (unsigned, device)
+        run: |
+          xcodebuild build \
+            -scheme Zhiyin \
+            -derivedDataPath build/DerivedData \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Unit tests (offline only, simulator)
+        run: |
+          xcodebuild test \
+            -scheme Zhiyin \
+            -derivedDataPath build/DerivedData \
+            -destination 'platform=iOS Simulator,name=iPhone 17' \
+            -skip-testing:RunseTests/PinyinLiveTests \
+            -skip-testing:RunseUITests \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="build/DerivedData/Build/Products/Debug-iphoneos/Zhiyin.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Zhiyin.app not found under build/DerivedData" >&2
+            find build/DerivedData -name "*.app" -type d | head
+            exit 1
+          fi
+          rm -rf build/Payload build/Zhiyin-unsigned.ipa
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+          (cd build && zip -qr Zhiyin-unsigned.ipa Payload)
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zhiyin-unsigned
+          path: build/Zhiyin-unsigned.ipa
+          retention-days: 14

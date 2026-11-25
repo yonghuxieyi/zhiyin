@@ -1,0 +1,514 @@
+import Foundation
+import SwiftAnthropic
+
+public struct LLMRequest: Sendable, Equatable {
+    public var action: TransformAction
+    public var model: String
+    public var systemPrompt: String
+    public var userPrompt: String
+    public var temperature: Double
+
+    public init(action: TransformAction, model: String, systemPrompt: String, userPrompt: String, temperature: Double = 0.2) {
+        self.action = action
+        self.model = model
+        self.systemPrompt = systemPrompt
+        self.userPrompt = userPrompt
+        self.temperature = temperature
+    }
+}
+
+public struct LLMResponse: Sendable, Equatable {
+    public var text: String
+    public var responseID: String?
+    public var model: String?
+    public var usage: [String: Int]
+
+    public var promptTokens: Int {
+        usage["prompt_tokens"] ?? usage["input_tokens"] ?? 0
+    }
+
+    public var completionTokens: Int {
+        usage["completion_tokens"] ?? usage["output_tokens"] ?? 0
+    }
+
+    public var totalTokens: Int {
+        usage["total_tokens"] ?? (promptTokens + completionTokens)
+    }
+
+    public init(text: String, responseID: String? = nil, model: String? = nil, usage: [String: Int] = [:]) {
+        self.text = text
+        self.responseID = responseID
+        self.model = model
+        self.usage = usage
+    }
+}
+
+public enum LLMProviderError: Error, LocalizedError, Equatable {
+    case missingAPIKey
+    case invalidURL
+    case timeout
+    case connectionLost(String)
+    case invalidStatus(Int, String, TimeInterval?)
+    case malformedJSON
+    case emptyOutput
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingAPIKey: "Missing API key."
+        case .invalidURL: "Invalid provider URL."
+        case .timeout: "The provider request timed out."
+        case .connectionLost(let message): "Network connection lost: \(message)"
+        case .invalidStatus(let code, let body, _): "Provider returned HTTP \(code): \(body)"
+        case .malformedJSON: "The provider response was malformed."
+        case .emptyOutput: "The provider returned an empty result."
+        }
+    }
+}
+
+public protocol LLMProviderClient {
+    @MainActor func complete(_ request: LLMRequest, onDelta: (@MainActor (String) -> Void)?) async throws -> LLMResponse
+}
+
+public extension LLMProviderClient {
+    @MainActor func complete(_ request: LLMRequest) async throws -> LLMResponse {
+        try await complete(request, onDelta: nil)
+    }
+}
+
+public final class HTTPProviderClient: LLMProviderClient {
+    private let profile: ProviderProfile
+    private let apiKey: String
+    private let session: URLSession
+
+    public init(profile: ProviderProfile, apiKey: String, session: URLSession = .shared) {
+        self.profile = profile
+        self.apiKey = apiKey
+        self.session = session
+    }
+
+    @MainActor public func complete(_ request: LLMRequest, onDelta: (@MainActor (String) -> Void)? = nil) async throws -> LLMResponse {
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw LLMProviderError.missingAPIKey
+        }
+        let policy = RetryPolicy.default
+        var attempt = 0
+        var streamedContent = false
+        while true {
+            attempt += 1
+            do {
+                return try await performAttempt(request: request, onDelta: { content in
+                    streamedContent = true
+                    onDelta?(content)
+                })
+            } catch {
+                // Only retry a call that has not streamed anything yet:
+                // re-sending after partial output would duplicate text.
+                let decision = RetryClassifier.decision(for: error)
+                guard !streamedContent, decision.isRetryable, attempt < policy.maxAttempts else { throw error }
+                if policy.stops(forServerDelay: decision.retryAfter) { throw error }
+                try Task.checkCancellation()
+                let delay = policy.backoffDelay(retry: attempt, retryAfter: decision.retryAfter)
+                try await Task.sleep(for: .seconds(delay))
+            }
+        }
+    }
+
+    @MainActor private func performAttempt(request: LLMRequest, onDelta: (@MainActor (String) -> Void)?) async throws -> LLMResponse {
+        switch profile.kind {
+        case .openAICompatible:
+            return try await streamOpenAIChat(request: request, onDelta: onDelta)
+        case .anthropicMessages, .anthropicCompatible:
+            return try await streamAnthropicMessage(request: request, onDelta: onDelta)
+        case .openAIResponses:
+            // The Responses API has a substantially different schema. Keep the
+            // existing one-shot path here; none of the bundled presets use it.
+            return try await legacyOneShot(request: request)
+        }
+    }
+
+    @MainActor private func streamOpenAIChat(request: LLMRequest, onDelta: (@MainActor (String) -> Void)?) async throws -> LLMResponse {
+        let urlRequest = try ProviderRequestFactory.streamingURLRequest(profile: profile, apiKey: apiKey, request: request)
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (bytes, response) = try await session.bytes(for: urlRequest)
+        } catch let error as URLError where error.code == .timedOut {
+            throw LLMProviderError.timeout
+        } catch {
+            throw mapStreamingError(error)
+        }
+        guard let http = response as? HTTPURLResponse else { throw LLMProviderError.malformedJSON }
+        guard (200..<300).contains(http.statusCode) else {
+            let body: String
+            do {
+                var errorData = Data()
+                for try await byte in bytes { errorData.append(byte) }
+                body = String(data: errorData, encoding: .utf8) ?? ""
+            } catch {
+                throw mapStreamingError(error)
+            }
+            throw LLMProviderError.invalidStatus(http.statusCode, body, RetrySupport.retryAfterSeconds(from: http))
+        }
+
+        var content = ""
+        var reasoning = ""
+        var model: String?
+        var responseID: String?
+        var usage: [String: Int] = [:]
+
+        do {
+            for try await line in bytes.lines {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.hasPrefix("data:") else { continue }
+                let payload = trimmed.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
+                if payload == "[DONE]" { break }
+                guard let data = payload.data(using: .utf8),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                if responseID == nil { responseID = object["id"] as? String }
+                if model == nil { model = object["model"] as? String }
+                var contentChanged = false
+                for choice in (object["choices"] as? [[String: Any]]) ?? [] {
+                    guard let delta = choice["delta"] as? [String: Any] else { continue }
+                    if let text = delta["content"] as? String {
+                        content += text
+                        contentChanged = true
+                    }
+                    if let text = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String) {
+                        reasoning += text
+                    }
+                }
+                if contentChanged, let onDelta { onDelta(content) }
+                if let chunkUsage = object["usage"] as? [String: Any] {
+                    usage = ProviderResponseParser.parseUsage(chunkUsage)
+                }
+            }
+        } catch let error as URLError where error.code == .timedOut {
+            throw LLMProviderError.timeout
+        } catch {
+            throw mapStreamingError(error)
+        }
+
+        return try finalize(content: content, reasoning: reasoning, model: model, responseID: responseID, usage: usage)
+    }
+
+    @MainActor private func streamAnthropicMessage(request: LLMRequest, onDelta: (@MainActor (String) -> Void)?) async throws -> LLMResponse {
+        let basePath = anthropicBasePath()
+        let service = AnthropicServiceFactory.service(
+            apiKey: apiKey,
+            basePath: basePath,
+            betaHeaders: nil
+        )
+        let parameter = MessageParameter(
+            model: .other(request.model),
+            messages: [.init(role: .user, content: .text(request.userPrompt))],
+            // Anthropic requires maxTokens. 4096 matches the legacy default
+            // and is well within Claude 3+ output limits.
+            maxTokens: 4096,
+            system: .text(request.systemPrompt),
+            stream: true,
+            temperature: request.temperature
+        )
+
+        var content = ""
+        var reasoning = ""
+        var model: String?
+        var responseID: String?
+        var usage: [String: Int] = [:]
+
+        do {
+            let stream = try await service.streamMessage(parameter)
+            for try await event in stream {
+                if let message = event.message {
+                    responseID = message.id
+                    model = message.model
+                    let usageInfo = message.usage
+                    if let input = usageInfo.inputTokens { usage["input_tokens"] = input }
+                    usage["output_tokens"] = usageInfo.outputTokens
+                }
+                if let delta = event.delta {
+                    if let text = delta.text {
+                        content += text
+                        if let onDelta { onDelta(content) }
+                    }
+                    if let thinking = delta.thinking { reasoning += thinking }
+                }
+                if let usageInfo = event.usage {
+                    if let input = usageInfo.inputTokens { usage["input_tokens"] = input }
+                    usage["output_tokens"] = usageInfo.outputTokens
+                }
+                if event.streamEvent == .messageStop { break }
+            }
+        } catch let error as URLError where error.code == .timedOut {
+            throw LLMProviderError.timeout
+        } catch {
+            throw mapStreamingError(error)
+        }
+
+        if usage["total_tokens"] == nil {
+            let total = (usage["input_tokens"] ?? 0) + (usage["output_tokens"] ?? 0)
+            if total > 0 { usage["total_tokens"] = total }
+        }
+        return try finalize(content: content, reasoning: reasoning, model: model, responseID: responseID, usage: usage)
+    }
+
+    @MainActor private func legacyOneShot(request: LLMRequest) async throws -> LLMResponse {
+        let urlRequest = try ProviderRequestFactory.urlRequest(profile: profile, apiKey: apiKey, request: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: urlRequest)
+        } catch let error as URLError where error.code == .timedOut {
+            throw LLMProviderError.timeout
+        }
+        guard let http = response as? HTTPURLResponse else { throw LLMProviderError.malformedJSON }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw LLMProviderError.invalidStatus(http.statusCode, body, RetrySupport.retryAfterSeconds(from: http))
+        }
+        return try ProviderResponseParser.parse(data: data, kind: profile.kind)
+    }
+
+    private func anthropicBasePath() -> String {
+        // SwiftAnthropic appends "/v1/messages" to the basePath, so we just
+        // pass the scheme://host[:port] portion. Trim a trailing slash since
+        // some providers include it in their configured baseURL.
+        var base = profile.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while base.hasSuffix("/") { base.removeLast() }
+        return base
+    }
+
+    private func finalize(content: String, reasoning: String, model: String?, responseID: String?, usage: [String: Int]) throws -> LLMResponse {
+        let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text: String
+        if !trimmedContent.isEmpty {
+            text = trimmedContent
+        } else {
+            let trimmedReasoning = reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedReasoning.isEmpty else { throw LLMProviderError.emptyOutput }
+            text = trimmedReasoning
+        }
+        return LLMResponse(text: text, responseID: responseID, model: model, usage: usage)
+    }
+
+    private func mapStreamingError(_ error: Error) -> LLMProviderError {
+        if let url = error as? URLError {
+            switch url.code {
+            case .timedOut:
+                return .timeout
+            case .networkConnectionLost, .notConnectedToInternet, .dataNotAllowed, .cannotConnectToHost:
+                // -1005 / -1009 etc — show only the short localized message,
+                // not the full URLError userInfo dump.
+                return .connectionLost(url.localizedDescription)
+            default:
+                break
+            }
+            if let response = url.userInfo["NSURLErrorFailingURLResponseErrorKey"] as? HTTPURLResponse {
+                return .invalidStatus(response.statusCode, url.localizedDescription, RetrySupport.retryAfterSeconds(from: response))
+            }
+            return .connectionLost(url.localizedDescription)
+        }
+        let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+        return .invalidStatus(-1, message, nil)
+    }
+}
+
+public struct ProviderAPITestResult: Sendable, Equatable {
+    public var message: String
+    public var promptTokens: Int
+    public var completionTokens: Int
+    public var totalTokens: Int
+
+    public init(message: String, promptTokens: Int = 0, completionTokens: Int = 0, totalTokens: Int = 0) {
+        self.message = message
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.totalTokens = totalTokens
+    }
+}
+
+public enum ProviderAPITester {
+    @MainActor public static func test(profile: ProviderProfile, apiKey: String) async throws -> ProviderAPITestResult {
+        let request = LLMRequest(
+            action: .refine,
+            model: profile.model,
+            systemPrompt: "You are an API connectivity test. Reply with OK only.",
+            userPrompt: "Reply with OK.",
+            temperature: 0
+        )
+        let response = try await HTTPProviderClient(profile: profile, apiKey: apiKey).complete(request)
+        return ProviderAPITestResult(
+            message: response.text,
+            promptTokens: response.promptTokens,
+            completionTokens: response.completionTokens,
+            totalTokens: response.totalTokens
+        )
+    }
+}
+
+public enum ProviderRequestFactory {
+    public static func urlRequest(profile: ProviderProfile, apiKey: String, request: LLMRequest) throws -> URLRequest {
+        let endpoint = endpointURL(profile: profile)
+        guard let url = URL(string: endpoint) else { throw LLMProviderError.invalidURL }
+        // 120s: refine on large-context models routinely takes 60–90s for a
+        // single non-streamed completion since we dropped streaming. 45s left
+        // users staring at a spinner that always failed.
+        var urlRequest = URLRequest(url: url, timeoutInterval: 120)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        for (key, value) in extraHeaders(from: profile.extraHeadersJSON) {
+            urlRequest.setValue(value, forHTTPHeaderField: key)
+        }
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body(profile: profile, request: request), options: [])
+        return urlRequest
+    }
+
+    public static func body(profile: ProviderProfile, request: LLMRequest) -> [String: Any] {
+        // Thinking is disabled explicitly for DeepSeek: with thinking on,
+        // DeepSeek ignores `temperature`, and reasoning models can burn
+        // their entire output budget on chain-of-thought, returning empty
+        // `content`. Other providers keep their server default. The response
+        // parser still falls back to `reasoning_content` / Anthropic
+        // `thinking` blocks when a model spontaneously returns one, so
+        // thinking output is surfaced rather than dropped.
+        switch profile.kind {
+        case .openAIResponses:
+            return [
+                "model": request.model,
+                "input": [
+                    ["role": "system", "content": request.systemPrompt],
+                    ["role": "user", "content": request.userPrompt]
+                ],
+                "temperature": request.temperature
+            ]
+        case .anthropicMessages, .anthropicCompatible:
+            return [
+                "model": request.model,
+                "system": request.systemPrompt,
+                "messages": [
+                    ["role": "user", "content": request.userPrompt]
+                ],
+                "temperature": request.temperature
+            ]
+        case .openAICompatible:
+            var openAIBody: [String: Any] = [
+                "model": request.model,
+                "messages": [
+                    ["role": "system", "content": request.systemPrompt],
+                    ["role": "user", "content": request.userPrompt]
+                ],
+                "temperature": request.temperature
+            ]
+            if isDeepSeekDomain(profile) {
+                openAIBody["thinking"] = ["type": "disabled"]
+            }
+            return openAIBody
+        }
+    }
+
+    /// DeepSeek's API honors an explicit thinking toggle; its default is
+    /// thinking on, which makes `temperature` ineffective.
+    public static func isDeepSeekDomain(_ profile: ProviderProfile) -> Bool {
+        guard let host = URL(string: profile.baseURL)?.host?.lowercased() else { return false }
+        return host == "deepseek.com" || host.hasSuffix(".deepseek.com")
+    }
+
+    /// Streaming variant of `urlRequest`: same body plus `stream` and
+    /// `stream_options.include_usage`, served as server-sent events.
+    public static func streamingURLRequest(profile: ProviderProfile, apiKey: String, request: LLMRequest) throws -> URLRequest {
+        var urlRequest = try urlRequest(profile: profile, apiKey: apiKey, request: request)
+        guard profile.kind == .openAICompatible else { return urlRequest }
+        var streamBody = body(profile: profile, request: request)
+        streamBody["stream"] = true
+        streamBody["stream_options"] = ["include_usage": true]
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: streamBody, options: [])
+        urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        // 180s inactivity timeout, matching the old streaming client: with
+        // streaming, deltas reset this on each chunk so it really only fires
+        // when the connection truly stalls.
+        urlRequest.timeoutInterval = 180
+        return urlRequest
+    }
+
+    private static func endpointURL(profile: ProviderProfile) -> String {
+        let base = profile.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let endpoint = profile.chatEndpoint.hasPrefix("/") ? profile.chatEndpoint : "/\(profile.chatEndpoint)"
+        return "\(base)\(endpoint)"
+    }
+
+    private static func extraHeaders(from json: String) -> [String: String] {
+        guard let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
+            return [:]
+        }
+        return object
+    }
+}
+
+public enum ProviderResponseParser {
+    /// Parse a non-streamed JSON body into an `LLMResponse`.
+    public static func parse(data: Data, kind: ProviderKind) throws -> LLMResponse {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw LLMProviderError.malformedJSON
+        }
+        let content: String?
+        let reasoning: String?
+        switch kind {
+        case .openAIResponses:
+            content = parseResponsesText(object)
+            reasoning = nil
+        case .openAICompatible:
+            let message = (object["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]
+            content = message?["content"] as? String
+            // DeepSeek and other reasoning-capable OpenAI-compatible providers
+            // surface chain-of-thought on `message.reasoning_content`. Fall back
+            // to it when `content` is empty so a thinking-only response still
+            // produces something useful.
+            reasoning = message?["reasoning_content"] as? String
+        case .anthropicMessages, .anthropicCompatible:
+            let blocks = object["content"] as? [[String: Any]] ?? []
+            content = blocks
+                .filter { ($0["type"] as? String) != "thinking" }
+                .compactMap { $0["text"] as? String }
+                .joined(separator: "\n")
+            reasoning = blocks
+                .filter { ($0["type"] as? String) == "thinking" }
+                .compactMap { $0["thinking"] as? String }
+                .joined(separator: "\n")
+        }
+        let trimmedContent = content?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let finalText: String
+        if !trimmedContent.isEmpty {
+            finalText = trimmedContent
+        } else {
+            let trimmedReasoning = reasoning?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !trimmedReasoning.isEmpty else { throw LLMProviderError.emptyOutput }
+            finalText = trimmedReasoning
+        }
+        return LLMResponse(
+            text: finalText,
+            responseID: object["id"] as? String,
+            model: object["model"] as? String,
+            usage: parseUsage(object["usage"] as? [String: Any])
+        )
+    }
+
+    private static func parseResponsesText(_ object: [String: Any]) -> String? {
+        if let direct = object["output_text"] as? String { return direct }
+        guard let output = object["output"] as? [[String: Any]] else { return nil }
+        return output.compactMap { item in
+            (item["content"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined()
+        }.joined(separator: "\n")
+    }
+
+    static func parseUsage(_ usage: [String: Any]?) -> [String: Int] {
+        usage?.reduce(into: [String: Int]()) { partial, item in
+            if let value = item.value as? Int {
+                partial[item.key] = value
+            } else if let value = item.value as? Double {
+                partial[item.key] = Int(value)
+            }
+        } ?? [:]
+    }
+}

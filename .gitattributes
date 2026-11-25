@@ -1,0 +1,4 @@
+# Track promo / demo video assets via Git LFS so the repo stays small
+# and clones don't drag a 2-3 MB blob through normal git history.
+docs/assets/video/*.mp4 filter=lfs diff=lfs merge=lfs -text
+docs/assets/video/*.mov filter=lfs diff=lfs merge=lfs -text

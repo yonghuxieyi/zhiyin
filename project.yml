@@ -1,0 +1,194 @@
+name: Zhiyin
+options:
+  minimumXcodeGenVersion: 2.42.0
+  deploymentTarget:
+    iOS: "18.0"
+configs:
+  Debug: debug
+  Release: release
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    IPHONEOS_DEPLOYMENT_TARGET: 18.0
+    PRODUCT_BUNDLE_IDENTIFIER: com.yonghuxieyi.zhiyin
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: 1
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+configFiles:
+  Debug: Config/Local.example.xcconfig
+  Release: Config/Local.example.xcconfig
+packages:
+  Sophon:
+    url: https://github.com/Luminoid/Sophon
+    from: "0.2.0"
+  SwiftAnthropic:
+    url: https://github.com/jamesrochabrun/SwiftAnthropic
+    from: "2.2.2"
+targets:
+  RunseCore:
+    type: framework
+    platform: iOS
+    sources:
+      - RunseCore
+    dependencies:
+      - package: Sophon
+        product: SophonOpenAI
+      - package: SwiftAnthropic
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yonghuxieyi.zhiyin.core
+        DEFINES_MODULE: YES
+        GENERATE_INFOPLIST_FILE: YES
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: 1
+  Runse:
+    type: application
+    platform: iOS
+    productName: Zhiyin
+    sources:
+      - Runse
+    dependencies:
+      - target: RunseCore
+      - target: RunseExtension
+        embed: true
+      - target: RunseShareExtension
+        embed: true
+    entitlements:
+      path: Runse/Runse.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.yonghuxieyi.zhiyin
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.yonghuxieyi.zhiyin.keychain
+    info:
+      path: Runse/Info.plist
+      properties:
+        CFBundleDisplayName: 智音
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        AppIdentifierPrefix: $(AppIdentifierPrefix)
+        UILaunchScreen:
+          UIColorName: ""
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # 智音 only sends data over HTTPS to the user-selected provider (a
+        # standard system networking call); no proprietary or non-standard
+        # encryption is used. Declaring this lets TestFlight skip the
+        # export-compliance prompt on every upload.
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yonghuxieyi.zhiyin
+        INFOPLIST_KEY_CFBundleDisplayName: 智音
+  RunseExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - RunseExtension
+    dependencies:
+      - target: RunseCore
+    entitlements:
+      path: RunseExtension/RunseExtension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.yonghuxieyi.zhiyin
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.yonghuxieyi.zhiyin.keychain
+    info:
+      path: RunseExtension/Info.plist
+      properties:
+        CFBundleDisplayName: 智音
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        AppIdentifierPrefix: $(AppIdentifierPrefix)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.ui-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ActionViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule: 'SUBQUERY(extensionItems, $extensionItem, SUBQUERY($extensionItem.attachments, $attachment, ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.text").@count == 1 AND $extensionItem.attachments.@count == 1).@count == 1'
+            NSExtensionActivationDictionaryVersion: 2
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yonghuxieyi.zhiyin.extension
+        INFOPLIST_KEY_CFBundleDisplayName: 智音
+  RunseShareExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - RunseExtension/ActionViewController.swift
+      - RunseExtension/ExtensionRootView.swift
+      - path: RunseShareExtension/zh-Hans.lproj
+        buildPhase: resources
+      - path: RunseShareExtension/zh-Hant.lproj
+        buildPhase: resources
+      - path: RunseShareExtension/ko.lproj
+        buildPhase: resources
+      - path: RunseShareExtension/ja.lproj
+        buildPhase: resources
+    dependencies:
+      - target: RunseCore
+    entitlements:
+      path: RunseShareExtension/RunseShareExtension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.yonghuxieyi.zhiyin
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.yonghuxieyi.zhiyin.keychain
+    info:
+      path: RunseShareExtension/Info.plist
+      properties:
+        CFBundleDisplayName: 智音
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        AppIdentifierPrefix: $(AppIdentifierPrefix)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ActionViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule: 'SUBQUERY(extensionItems, $extensionItem, SUBQUERY($extensionItem.attachments, $attachment, ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.text").@count == 1 AND $extensionItem.attachments.@count == 1).@count == 1'
+            NSExtensionActivationDictionaryVersion: 2
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yonghuxieyi.zhiyin.share-extension
+        INFOPLIST_KEY_CFBundleDisplayName: 智音
+  RunseTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - RunseTests
+    dependencies:
+      - target: RunseCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yonghuxieyi.zhiyin.tests
+        GENERATE_INFOPLIST_FILE: YES
+  RunseUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - RunseUITests
+    dependencies:
+      - target: Runse
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yonghuxieyi.zhiyin.uitests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Zhiyin:
+    build:
+      targets:
+        Runse: all
+        RunseExtension: all
+        RunseShareExtension: all
+        RunseTests: [test]
+        RunseUITests: [test]
+    test:
+      targets:
+        - RunseTests
+        - RunseUITests

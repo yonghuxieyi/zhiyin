@@ -1,0 +1,16 @@
+Config/Secrets.xcconfig
+Config/Local.xcconfig
+.DS_Store
+*.png
+!Runse/Assets.xcassets/**/*.png
+!docs/**/*.png
+build/
+!build/
+build/*
+!build/ExportOptions-appstore.plist
+DerivedData/
+*.xcarchive
+*.ipa
+*.xcuserstate
+xcuserdata/
+*.moved-aside
