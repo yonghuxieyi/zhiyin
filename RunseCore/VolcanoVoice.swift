@@ -456,7 +456,7 @@ public actor VolcanoTTSClient {
     /// submit returns `{"code": 20000000, "data": {"task_id": ...,
     /// "task_status": 1}}`. The task id lives under `data`, not at the
     /// top level. Pure function, covered by unit tests.
-    static func parseSubmitResponse(_ data: Data) throws -> String {
+    public static func parseSubmitResponse(_ data: Data) throws -> String {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let code = object["code"] as? Int, code == 20000000,
               let inner = object["data"] as? [String: Any],
@@ -469,7 +469,7 @@ public actor VolcanoTTSClient {
     /// query returns `{"code": 20000000, "data": {"task_status": 1|2|3,
     /// "audio_url": ...}}`. task_status: 1 running, 2 success, 3 failed.
     /// Pure function, covered by unit tests.
-    static func parseQueryResponse(_ data: Data) throws -> (status: Int, audioURL: String?) {
+    public static func parseQueryResponse(_ data: Data) throws -> (status: Int, audioURL: String?) {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let code = object["code"] as? Int, code == 20000000,
               let inner = object["data"] as? [String: Any],
