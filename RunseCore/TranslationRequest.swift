@@ -6,7 +6,14 @@ import Foundation
 /// steps inline — pick the default profile, load its key from the
 /// keychain, pick the translate template — and any fix to one step
 /// had to be repeated six times. This is the single entry point.
-public struct TranslationRequestContext: Sendable {
+/// Deliberately NOT Sendable: `profile` and `template` are SwiftData
+/// @Model classes — mutable reference types bound to a model context,
+/// so they cannot honestly conform to Sendable (their stored
+/// properties are all `var`; `@unchecked Sendable` would be a lie).
+/// No Sendable is needed: `resolve` is @MainActor, all seven call
+/// sites are @MainActor views, and `TranslationPipeline.translate`
+/// is @MainActor, so a context never crosses an isolation boundary.
+public struct TranslationRequestContext {
     public var profile: ProviderProfile
     public var apiKey: String
     public var template: PromptTemplate
