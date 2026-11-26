@@ -461,9 +461,12 @@ struct TranslateView: View {
     private var currentPair: (source: TextLanguage, target: TextLanguage) {
         switch direction {
         case .toEnglish:
-            (.chinese, .english)
+            // Bare tuple literals don't get the function's return type as
+            // contextual type in an implicit switch-branch return, so the
+            // enum cases must be fully qualified here.
+            return (source: TextLanguage.chinese, target: TextLanguage.english)
         case .toChinese:
-            (.english, .chinese)
+            return (source: TextLanguage.english, target: TextLanguage.chinese)
         case .auto:
             guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return (.chinese, .english)
