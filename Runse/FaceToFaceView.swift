@@ -64,14 +64,20 @@ struct FaceToFaceView: View {
     /// (21:33); the view picker switches to face-to-face.
     @State private var isSingleMode = true
     @State private var showingViewPicker = false
+    /// Item 9 (UI redesign): continuous mode runs on the
+    /// simultaneous-interpretation engine (21:42: continuous mode IS
+    /// interpretation) — single mode is one-way, face-to-face is
+    /// two-way (21:51). The engine owns the mic while a session is
+    /// running; the one-shot loop below is only for single turns.
+    @StateObject private var interpretEngine = InterpretationEngine()
+    /// Item 9: the streaming TTS client behind the engine's
+    /// sequential-line speaker; disconnected when the session ends.
+    @State private var continuousStreamingClient: VolcanoStreamingTTSClient?
     /// Item 8 (UI redesign): continuous mode, entered by long-pressing
     /// the mic for 1 second (21:54, 22:59). Tap pauses / resumes in
-    /// continuous mode; long-press again exits. The streaming engine
-    /// itself arrives in item 9 — until then a turn uses the existing
-    /// one-shot listen → translate → speak loop and restarts itself.
+    /// continuous mode; long-press again exits.
     @State private var isContinuousMode = false
     @State private var isContinuousPaused = false
-    @State private var continuousSide: FaceSide = .me
     @State private var continuousElapsed: TimeInterval = 0
     @State private var continuousTickerTask: Task<Void, Never>?
 
@@ -109,20 +115,18 @@ struct FaceToFaceView: View {
         // session — its controls live on the mic of the current mode.
         .onChange(of: isSingleMode) { _, _ in
             if isContinuousMode {
-                stopContinuousMode()
+                Task { await stopContinuousMode() }
             }
         }
         .task {
             config = await VolcanoVoiceStore.load()
         }
         .onDisappear {
-            // Item 8: leaving the page ends the continuous session
+            // Item 8/9: leaving the page ends the continuous session
             // (21:58: exiting closes voice) and stops its timer.
+            // stopContinuousMode also persists the session history.
             if isContinuousMode {
-                isContinuousMode = false
-                isContinuousPaused = false
-                continuousElapsed = 0
-                stopContinuousTicker()
+                Task { await stopContinuousMode() }
             }
             // N6: leaving the page must stop the mic / ASR socket,
             // or recording keeps uploading with no UI and the mic
@@ -146,34 +150,84 @@ struct FaceToFaceView: View {
     /// continuous mode stays on the mic long-press (item 8).
     private var singleModeView: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    ForEach(turns) { turn in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(turn.source)
-                                .font(.body)
-                            Text(turn.translation)
-                                .font(.body)
-                                .foregroundStyle(.secondary)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if isContinuousMode {
+                            // Item 9 (21:58): scrolling subtitles —
+                            // the live engine's segments and draft.
+                            ForEach(interpretEngine.segments) { segment in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(segment.sourceText)
+                                        .font(.body)
+                                    Text(segment.translationText)
+                                        .font(.body)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            if !interpretEngine.liveDraftSource.isEmpty || !interpretEngine.liveDraftTranslation.isEmpty {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(interpretEngine.liveDraftSource)
+                                        .font(.body)
+                                        .foregroundStyle(.primary.opacity(0.6))
+                                    Text(interpretEngine.liveDraftTranslation)
+                                        .font(.body)
+                                        .foregroundStyle(.secondary.opacity(0.6))
+                                }
+                            }
+                            if interpretEngine.segments.isEmpty && interpretEngine.liveDraftSource.isEmpty && interpretEngine.liveDraftTranslation.isEmpty {
+                                Text("连续对话进行中，说话后译文会滚动出现在这里。")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.top, 32)
+                            }
+                        } else {
+                            ForEach(turns) { turn in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(turn.source)
+                                        .font(.body)
+                                    Text(turn.translation)
+                                        .font(.body)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            if !liveTranscript.isEmpty {
+                                Text(liveTranscript)
+                                    .font(.callout)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            if turns.isEmpty && liveTranscript.isEmpty {
+                                Text("点下面的麦克风说话，译文会出现在这里。")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.top, 32)
+                            }
                         }
+                        Color.clear.frame(height: 1).id("listBottom")
                     }
-                    if !liveTranscript.isEmpty {
-                        Text(liveTranscript)
-                            .font(.callout)
-                            .foregroundStyle(.tertiary)
-                    }
-                    if turns.isEmpty && liveTranscript.isEmpty {
-                        Text("点下面的麦克风说话，译文会出现在这里。")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 32)
-                    }
+                    .padding()
                 }
-                .padding()
+                .onChange(of: turns.count) { _, _ in
+                    withAnimation { proxy.scrollTo("listBottom", anchor: .bottom) }
+                }
+                .onChange(of: interpretEngine.segments.count) { _, _ in
+                    withAnimation { proxy.scrollTo("listBottom", anchor: .bottom) }
+                }
+                .onChange(of: interpretEngine.liveDraftSource) { _, _ in
+                    guard !interpretEngine.liveDraftSource.isEmpty else { return }
+                    withAnimation { proxy.scrollTo("listBottom", anchor: .bottom) }
+                }
             }
             VStack(spacing: 12) {
+                // Item 9 (21:51): a small sound-wave animation while
+                // the continuous session is live.
+                if isContinuousMode {
+                    continuousWaveform
+                }
                 HStack {
                     Spacer()
                     Button {
@@ -210,6 +264,24 @@ struct FaceToFaceView: View {
     /// shared by both modes (was inline in the dual layout).
     @ViewBuilder
     private var errorBlock: some View {
+        // Item 9: while a continuous session is live, surface the
+        // engine's own state — connecting, its error, or the
+        // sequential-line fallback — under the mic area.
+        if isContinuousMode {
+            if interpretEngine.phase == .connecting {
+                Text("正在连接同传…")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else if let engineError = interpretEngine.errorMessage {
+                Text(engineError)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            } else if interpretEngine.mode == .fallback {
+                Text("实时同传不可用，已切换到顺序语音线。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
         if let errorMessage {
             Text(errorMessage)
                 .font(.footnote)
@@ -236,15 +308,15 @@ struct FaceToFaceView: View {
             ZStack {
                 Color(.systemGray6)
                 VStack(spacing: 12) {
-                    if let turn = latestTurn {
-                        Text(turn.translation)
+                    if let display = dualDisplay {
+                        Text(display.translation)
                             .font(.title2)
                             .multilineTextAlignment(.center)
-                        Text(turn.source)
+                        Text(display.source)
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
-                        Text(turn.speaker == .them ? "你说的" : "对方说的")
+                        Text(display.speaker == .them ? "你说的" : "对方说的")
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     } else {
@@ -255,13 +327,7 @@ struct FaceToFaceView: View {
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                     }
-                    Button {
-                        toggleTask = Task { await toggleListening(side: .them) }
-                    } label: {
-                        Label(listeningSide == .them ? "正在听…" : "对方说话", systemImage: "mic")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled((isWorking || listeningSide != nil) && listeningSide != .them)
+                    dualMicButton(side: .them)
                 }
                 .padding()
             }
@@ -273,15 +339,21 @@ struct FaceToFaceView: View {
             ZStack {
                 Color(.systemBackground)
                 VStack(spacing: 12) {
-                    if let turn = latestTurn {
-                        Text(turn.source)
+                    if let display = dualDisplay {
+                        Text(display.source)
                             .font(.title3)
                             .multilineTextAlignment(.center)
-                        Text(turn.translation)
+                        Text(display.translation)
                             .font(.body)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
-                        if !liveTranscript.isEmpty {
+                        if isContinuousMode {
+                            if !interpretEngine.liveDraftSource.isEmpty {
+                                Text(interpretEngine.liveDraftSource)
+                                    .font(.callout)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        } else if !liveTranscript.isEmpty {
                             Text(liveTranscript)
                                 .font(.callout)
                                 .foregroundStyle(.tertiary)
@@ -293,13 +365,7 @@ struct FaceToFaceView: View {
                             .multilineTextAlignment(.center)
                     }
                     HStack(spacing: 16) {
-                        Button {
-                            toggleTask = Task { await toggleListening(side: .me) }
-                        } label: {
-                            Label(listeningSide == .me ? "正在听…" : "我说", systemImage: "mic")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled((isWorking || listeningSide != nil) && listeningSide != .me)
+                        dualMicButton(side: .me)
                         if isWorking {
                             Button {
                                 toggleTask?.cancel()
@@ -315,6 +381,11 @@ struct FaceToFaceView: View {
                         }
                         .buttonStyle(.bordered)
                         .disabled(latestTurn == nil || isWorking)
+                    }
+                    // Item 9 (21:51): sound-wave animation while the
+                    // continuous session is live.
+                    if isContinuousMode {
+                        continuousWaveform
                     }
                     errorBlock
                 }
@@ -363,6 +434,85 @@ struct FaceToFaceView: View {
         await toggleListening(side: .me)
     }
 
+    /// Item 9: what the face-to-face halves show. In continuous mode
+    /// the live engine's latest segment (and draft) instead of the
+    /// last one-shot turn.
+    private var dualDisplay: (source: String, translation: String, speaker: FaceSide)? {
+        if isContinuousMode {
+            if let segment = interpretEngine.segments.last {
+                return (segment.sourceText, segment.translationText, segment.direction == .zhToEn ? .me : .them)
+            }
+            if !interpretEngine.liveDraftSource.isEmpty || !interpretEngine.liveDraftTranslation.isEmpty {
+                return (interpretEngine.liveDraftSource, interpretEngine.liveDraftTranslation, .me)
+            }
+            return nil
+        }
+        if let turn = latestTurn {
+            return (turn.source, turn.translation, turn.speaker)
+        }
+        return nil
+    }
+
+    /// Item 9: a face-to-face mic button. Tap starts / stops one-shot
+    /// listening for that side; long-press 1 second enters the
+    /// bidirectional continuous session (21:51: dual is two-way); in
+    /// continuous mode tap pauses / resumes the shared session and
+    /// long-press exits it. (A plain Button cannot take a long-press,
+    /// so this is a label with tap + long-press gestures; the
+    /// disabled look is an opacity, and the tap does nothing.)
+    private func dualMicButton(side: FaceSide) -> some View {
+        let listening = listeningSide == side
+        let labelText: String = {
+            if isContinuousMode { return isContinuousPaused ? "继续" : "暂停" }
+            if listening { return "正在听…" }
+            return side == .me ? "我说" : "对方说话"
+        }()
+        let busyElsewhere = isWorking || (listeningSide != nil && listeningSide != side)
+        return Label(labelText, systemImage: "mic")
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background((isContinuousMode || listening) ? Color.green : Color.accentColor, in: Capsule())
+            .foregroundStyle(.white)
+            .opacity(busyElsewhere && !isContinuousMode ? 0.5 : 1)
+            .onTapGesture {
+                if isContinuousMode {
+                    toggleContinuousPause()
+                } else if listening {
+                    toggleTask = Task { await stopListening() }
+                } else if !busyElsewhere {
+                    toggleTask = Task { await toggleListening(side: side) }
+                }
+            }
+            .onLongPressGesture(minimumDuration: 1.0) {
+                if isContinuousMode {
+                    Task { await stopContinuousMode() }
+                } else if !busyElsewhere {
+                    Task { await startContinuousMode() }
+                }
+            }
+            .accessibilityLabel(side == .me ? "我的麦克风" : "对方麦克风")
+            .accessibilityAddTraits(.isButton)
+    }
+
+    /// Item 9 (21:51): a small sound-wave animation while the
+    /// continuous session is live; frozen low bars while paused.
+    private var continuousWaveform: some View {
+        Group {
+            if isContinuousPaused {
+                HStack(spacing: 3) {
+                    ForEach(0..<5) { _ in
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color.green.opacity(0.5))
+                            .frame(width: 3, height: 8)
+                    }
+                }
+                .frame(height: 28)
+            } else {
+                WaveformView()
+            }
+        }
+    }
+
     /// Item 8: the single-mode mic. Tap starts / stops (21:58);
     /// long-press 1 second enters / exits continuous mode (21:54,
     /// 22:59); in continuous mode tap pauses / resumes. Tap and
@@ -391,14 +541,14 @@ struct FaceToFaceView: View {
                     }
                 }
                 .frame(width: 96, height: 96)
-                .background(Color.accentColor, in: Circle())
+                .background(Color.green, in: Circle())
                 .foregroundStyle(.white)
             } else {
                 Image(systemName: listeningSide != nil ? "stop.fill" : "mic.fill")
                     .font(.title2)
                     .frame(width: 72, height: 72)
-                    .background(Color.accentColor, in: Circle())
-                    .foregroundStyle(.white)
+                    .background(micButtonColor, in: Circle())
+                    .foregroundStyle(micIconColor)
             }
         }
         .onTapGesture {
@@ -410,13 +560,23 @@ struct FaceToFaceView: View {
         }
         .onLongPressGesture(minimumDuration: 1.0) {
             if isContinuousMode {
-                stopContinuousMode()
+                Task { await stopContinuousMode() }
             } else {
-                startContinuousMode(side: .me)
+                Task { await startContinuousMode() }
             }
         }
         .accessibilityLabel(singleMicLabel)
         .accessibilityAddTraits(.isButton)
+    }
+
+    /// Item 9 (21:51): the mic button shows whether it is in use —
+    /// grey when idle, green while listening or in continuous mode.
+    private var micButtonColor: Color {
+        listeningSide != nil ? .green : Color(.systemGray5)
+    }
+
+    private var micIconColor: Color {
+        listeningSide != nil ? .white : .primary
     }
 
     private var singleMicLabel: String {
@@ -438,35 +598,149 @@ struct FaceToFaceView: View {
         UIImpactFeedbackGenerator(style: style).impactOccurred()
     }
 
-    /// Item 8: long-press (1s) enters continuous mode (21:54, 22:59).
+    /// Item 9: long-press (1s) enters continuous mode (21:54, 22:59)
+    /// on the interpretation engine (21:42: continuous mode IS
+    /// interpretation). Single mode is one-way, face-to-face is
+    /// two-way (21:51): the single user speaks Chinese to English
+    /// (the only target language today, 21:33); two people get both
+    /// directions, switched by auto-detected language.
     @MainActor
-    private func startContinuousMode(side: FaceSide) {
-        guard !isContinuousMode, !isWorking else { return }
+    private func startContinuousMode() async {
+        guard !isContinuousMode, !isWorking, listeningSide == nil else { return }
+        guard let config else {
+            errorMessage = "语音未配置。"
+            return
+        }
         micHaptic(.medium)
-        continuousSide = side
+        errorMessage = nil
         isContinuousMode = true
         isContinuousPaused = false
         continuousElapsed = 0
         startContinuousTicker()
-        toggleTask = Task { await toggleListening(side: side) }
+        // M11: keep the screen awake for the whole session.
+        UIApplication.shared.isIdleTimerDisabled = true
+        await startInterpretEngine(config: config)
     }
 
-    /// Item 8: long-press again stops continuous mode (21:54).
+    /// Item 9: the engine wiring, mirrored from the interpretation
+    /// page — same translator (DeepSeek / Qwen-MT fallback), same
+    /// speaker order (my voice, then streaming TTS, then async MP3).
     @MainActor
-    private func stopContinuousMode() {
+    private func startInterpretEngine(config: VolcanoVoiceConfig) async {
+        let glossary = GlossaryAST.glossaryList(from: glossaryEntries)
+        let translator: InterpretationEngine.Translator = { text, source, target, note in
+            let request = try await TranslationRequestResolver.resolve(profiles: profiles, templates: templates)
+            let profile = request.profile
+            let apiKey = request.apiKey
+            let template = request.template
+            let targetLanguage = target == .en ? "English" : "中文"
+            let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
+            let results = try await TranslationPipeline().translate(
+                segments: [text],
+                profile: profile,
+                apiKey: apiKey,
+                targetLanguage: targetLanguage,
+                template: template,
+                glossary: glossaryEntries,
+                customInstruction: note,
+                tone: SettingsStore().translationTone,
+                fallbackProfile: fallback?.profile,
+                fallbackAPIKey: fallback?.apiKey
+            ) { _, _ in }
+            return results.first?.translation ?? ""
+        }
+        let speaker: InterpretationEngine.Speaker = { text in
+            if await MyVoice.isEnabled(),
+               let apiKey = await DashScopeStore.loadKey(),
+               let voiceID = await QwenVoiceStore.loadVoiceID() {
+                let settings = VoiceSettings()
+                let workspaceID = await DashScopeStore.loadWorkspaceID()
+                return try await QwenVoiceClone.synthesize(apiKey: apiKey, workspaceID: workspaceID, text: text, voiceID: voiceID, rate: settings.speechRate)
+            }
+            let settings = VoiceSettings()
+            return try await VolcanoTTSClient(config: config).synthesize(text: text, speaker: settings.speakerID, speechRate: settings.speechRate)
+        }
+        // Streaming TTS for the sequential line (清单 12), same as
+        // the interpretation page. Skipped when "my voice" is on:
+        // the cloned voice has no streaming path here.
+        var streamingSpeaker: InterpretationEngine.StreamingSpeaker?
+        if await MyVoice.isEnabled() == false {
+            let streamingClient = VolcanoStreamingTTSClient(config: config)
+            do {
+                try await streamingClient.connect()
+                try streamingPlayer.start()
+                self.continuousStreamingClient = streamingClient
+                streamingSpeaker = { [streamingPlayer] text in
+                    let settings = VoiceSettings()
+                    try await streamingClient.synthesize(text: text, speaker: settings.speakerID, speechRate: settings.speechRate) { pcm in
+                        streamingPlayer.enqueue(pcm)
+                    }
+                }
+            } catch {
+                self.continuousStreamingClient = nil
+            }
+        }
+        await interpretEngine.start(
+            direction: isSingleMode ? .zhToEn : .both,
+            config: config,
+            glossary: glossary,
+            translator: translator,
+            speaker: speaker,
+            streamingSpeaker: streamingSpeaker
+        )
+    }
+
+    /// Item 9: long-press again stops continuous mode (21:51: pressing
+    /// the continuous-mode button again is the end). The flags drop
+    /// first so a second call hits the guard instead of persisting
+    /// the session twice.
+    @MainActor
+    private func stopContinuousMode() async {
         guard isContinuousMode else { return }
         isContinuousMode = false
         isContinuousPaused = false
         continuousElapsed = 0
         stopContinuousTicker()
-        if listeningSide != nil {
-            toggleTask = Task { await stopListening() }
+        let record = await interpretEngine.stop()
+        streamingPlayer.stop()
+        if let client = continuousStreamingClient {
+            continuousStreamingClient = nil
+            await client.disconnect()
+        }
+        UIApplication.shared.isIdleTimerDisabled = false
+        // Keep the session visible in the conversation list after
+        // exit: the engine's segments become turns (a zh→en segment
+        // is mine speaking, an en→zh segment is the other person).
+        for segment in record.segments where !segment.sourceText.isEmpty || !segment.translationText.isEmpty {
+            turns.append(FaceTurn(
+                speaker: segment.direction == .zhToEn ? .me : .them,
+                source: segment.sourceText,
+                translation: segment.translationText
+            ))
+        }
+        // 22:02: the session content goes into history（最近项目）。
+        if !record.segments.isEmpty {
+            modelContext.insert(InterpretationSession(record: record))
+            for segment in record.segments {
+                guard !segment.sourceText.isEmpty, !segment.translationText.isEmpty else { continue }
+                modelContext.insert(TransformHistory(
+                    sourceExcerpt: TextExcerpt.make(segment.sourceText),
+                    resultExcerpt: TextExcerpt.make(segment.translationText),
+                    providerName: "连续对话",
+                    model: "同传",
+                    action: .translate,
+                    targetLanguage: segment.direction == .zhToEn ? "English" : "中文",
+                    status: "success"
+                ))
+            }
+            try? modelContext.save()
         }
     }
 
-    /// Item 8: tap in continuous mode pauses / resumes (21:54).
-    /// Pausing finishes the current utterance (its content is kept)
-    /// and does not start the next turn until resumed.
+    /// Item 9: tap in continuous mode pauses / resumes (21:54).
+    /// The engine keeps the finished content (21:58: pause keeps
+    /// what came before) and rebuilds the socket on resume if it
+    /// went stale; the one-shot loop is not involved any more.
     @MainActor
     private func toggleContinuousPause() {
         guard isContinuousMode else { return }
@@ -474,28 +748,12 @@ struct FaceToFaceView: View {
         if isContinuousPaused {
             isContinuousPaused = false
             startContinuousTicker()
-            // If a turn is still translating, its end restarts
-            // listening via maybeContinueContinuous — starting a
-            // second session now would hear the speaker.
-            if listeningSide == nil && !isWorking {
-                toggleTask = Task { await toggleListening(side: continuousSide) }
-            }
+            Task { await interpretEngine.resume() }
         } else {
             isContinuousPaused = true
             stopContinuousTicker()
-            if listeningSide != nil {
-                toggleTask = Task { await stopListening() }
-            }
+            interpretEngine.pause()
         }
-    }
-
-    /// Item 8: after a turn ends, continuous mode starts the next
-    /// turn automatically (until paused / exited). The streaming
-    /// engine itself arrives in item 9.
-    @MainActor
-    private func maybeContinueContinuous() async {
-        guard isContinuousMode, !isContinuousPaused, !Task.isCancelled else { return }
-        await toggleListening(side: continuousSide)
     }
 
     @MainActor
@@ -587,9 +845,6 @@ struct FaceToFaceView: View {
         recorder.stop()
         guard let client = asrClient else {
             listeningSide = nil
-            // Item 8: nothing was listening — a continuous session
-            // still starts its next turn from here.
-            await maybeContinueContinuous()
             return
         }
         asrClient = nil
@@ -609,9 +864,6 @@ struct FaceToFaceView: View {
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
-        // Item 8: a finished turn restarts listening while the
-        // continuous session is running and not paused.
-        await maybeContinueContinuous()
     }
 
     @MainActor
@@ -739,6 +991,31 @@ struct FaceToFaceView: View {
                 return
             } catch {
                 errorMessage = "语音合成失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+            }
+        }
+    }
+}
+
+/// Item 9 (21:51): a small sound-wave animation — five bars swaying
+/// between two heights while a continuous session is live.
+private struct WaveformView: View {
+    @State private var phase = false
+
+    private let upHeights: [CGFloat] = [10, 20, 28, 20, 10]
+    private let downHeights: [CGFloat] = [20, 10, 14, 10, 20]
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<5) { i in
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.green)
+                    .frame(width: 3, height: phase ? upHeights[i] : downHeights[i])
+            }
+        }
+        .frame(height: 28)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.45).repeatForever(autoreverses: true)) {
+                phase.toggle()
             }
         }
     }
