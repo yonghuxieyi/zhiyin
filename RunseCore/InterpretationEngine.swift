@@ -203,7 +203,11 @@ public final class InterpretationEngine: ObservableObject {
         pausedAt = nil
         if mode == .live {
             // LiveInterpretClient is an actor: isConnected needs await.
-            let anyConnected = (await forwardClient?.isConnected ?? false) || (await reverseClient?.isConnected ?? false)
+            // Each await must be its own statement: `||` / `??` take
+            // @autoclosure operands, which cannot contain `await`.
+            let forwardConnected = await forwardClient?.isConnected ?? false
+            let reverseConnected = await reverseClient?.isConnected ?? false
+            let anyConnected = forwardConnected || reverseConnected
             if pausedFor > 60 || !anyConnected {
                 await startLiveSessions()
                 return
