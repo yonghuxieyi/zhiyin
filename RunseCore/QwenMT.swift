@@ -9,7 +9,14 @@ import Foundation
 ///   (highest quality). Both support streaming.
 /// - The request must contain exactly ONE user message with the text;
 ///   no system message. `translation_options` (source_lang, target_lang,
-///   terms) goes in `extra_body` — it is not a standard OpenAI field.
+///   terms) is a TOP-LEVEL request-body field (M2 — the official curl
+///   example sends it there; the earlier `extra_body` reading came from
+///   the Python SDK, which merges it to the top level, and was wrong
+///   for a raw HTTP call).
+/// - Streaming: Flash is incremental (each chunk adds text); Plus is
+///   non-incremental (each chunk is the full translation so far) per
+///   third-party docs — M3 handles Plus by replacing, not appending.
+///   Not yet verified against a real key: 待真机验证.
 /// - Context 16K, max output 8K tokens. Segments are capped well below
 ///   that so a segment can never overflow the output budget.
 /// - The DashScope API key is per-region; a Beijing key only works with

@@ -191,7 +191,18 @@ public final class HTTPProviderClient: LLMProviderClient {
                 for choice in (object["choices"] as? [[String: Any]]) ?? [] {
                     guard let delta = choice["delta"] as? [String: Any] else { continue }
                     if let text = delta["content"] as? String {
-                        content += text
+                        // M3: Qwen-MT Plus streams non-incrementally —
+                        // each chunk carries the full translation so far
+                        // (flash is incremental). Appending Plus chunks
+                        // would duplicate the text into gibberish, so a
+                        // Plus chunk replaces the accumulated content.
+                        // Unverified against a real key (third-party docs
+                        // only): mark as 待真机验证, see QwenMT.swift.
+                        if profile.isQwenMTPlus {
+                            content = text
+                        } else {
+                            content += text
+                        }
                         contentChanged = true
                     }
                     if let text = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String) {
@@ -299,16 +310,16 @@ public final class HTTPProviderClient: LLMProviderClient {
     }
 
     private func finalize(content: String, reasoning: String, model: String?, responseID: String?, usage: [String: Int]) throws -> LLMResponse {
+        // M4: when `content` is empty, never return the reasoning /
+        // thinking text as the translation — the user would see the
+        // model's chain-of-thought as if it were the translated text.
+        // Throw emptyOutput so retry / fallback can take over instead.
+        // `reasoning` is kept in the signature (callers still collect
+        // it) but is deliberately never surfaced as the result.
+        _ = reasoning
         let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        let text: String
-        if !trimmedContent.isEmpty {
-            text = trimmedContent
-        } else {
-            let trimmedReasoning = reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedReasoning.isEmpty else { throw LLMProviderError.emptyOutput }
-            text = trimmedReasoning
-        }
-        return LLMResponse(text: text, responseID: responseID, model: model, usage: usage)
+        guard !trimmedContent.isEmpty else { throw LLMProviderError.emptyOutput }
+        return LLMResponse(text: trimmedContent, responseID: responseID, model: model, usage: usage)
     }
 
     private func mapStreamingError(_ error: Error) -> LLMProviderError {
@@ -389,10 +400,10 @@ public enum ProviderRequestFactory {
         // Thinking is disabled explicitly for DeepSeek: with thinking on,
         // DeepSeek ignores `temperature`, and reasoning models can burn
         // their entire output budget on chain-of-thought, returning empty
-        // `content`. Other providers keep their server default. The response
-        // parser still falls back to `reasoning_content` / Anthropic
-        // `thinking` blocks when a model spontaneously returns one, so
-        // thinking output is surfaced rather than dropped.
+        // `content`. Other providers keep their server default. M4: the
+        // response parser no longer falls back to `reasoning_content` /
+        // Anthropic `thinking` blocks — empty content throws emptyOutput
+        // instead of showing chain-of-thought as a translation.
         switch profile.kind {
         case .openAIResponses:
             return [
@@ -415,7 +426,12 @@ public enum ProviderRequestFactory {
         case .openAICompatible:
             // Qwen-MT (DashScope) has a strict shape: exactly ONE user
             // message with the text, no system message, and the language
-            // pair plus glossary terms in `extra_body.translation_options`.
+            // pair plus glossary terms in a TOP-LEVEL
+            // `translation_options` field. M2: the previous code nested
+            // it under `extra_body`, which is only an OpenAI Python SDK
+            // parameter mechanism — the official curl example sends
+            // `translation_options` at the top level, and a raw HTTP
+            // call would never reach the server's language settings.
             // Temperature is left out: Qwen-MT is a specialist model and
             // the docs do not list it as a supported parameter.
             if profile.isQwenMT {
@@ -433,7 +449,7 @@ public enum ProviderRequestFactory {
                     "messages": [
                         ["role": "user", "content": request.userPrompt]
                     ],
-                    "extra_body": ["translation_options": options]
+                    "translation_options": options
                 ]
             }
             var openAIBody: [String: Any] = [
@@ -521,15 +537,13 @@ public enum ProviderResponseParser {
                 .compactMap { $0["thinking"] as? String }
                 .joined(separator: "\n")
         }
+        // M4: same rule as `finalize` — empty content throws
+        // emptyOutput; reasoning/thinking text is never returned as
+        // the translation.
+        _ = reasoning
         let trimmedContent = content?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let finalText: String
-        if !trimmedContent.isEmpty {
-            finalText = trimmedContent
-        } else {
-            let trimmedReasoning = reasoning?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !trimmedReasoning.isEmpty else { throw LLMProviderError.emptyOutput }
-            finalText = trimmedReasoning
-        }
+        guard !trimmedContent.isEmpty else { throw LLMProviderError.emptyOutput }
+        let finalText = trimmedContent
         return LLMResponse(
             text: finalText,
             responseID: object["id"] as? String,

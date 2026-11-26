@@ -36,6 +36,21 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(response.usage["total_tokens"], 3)
     }
 
+    func testReasoningOnlyResponseThrowsEmptyOutput() {
+        // M4: a response with empty content but reasoning text must not
+        // be returned as the translation.
+        let data = Data(#"{"choices":[{"message":{"content":"","reasoning_content":"some chain of thought"}}]}"#.utf8)
+        XCTAssertThrowsError(try ProviderResponseParser.parse(data: data, kind: .openAICompatible)) { error in
+            XCTAssertEqual(error as? LLMProviderError, .emptyOutput)
+        }
+    }
+
+    func testQwenMTPlusIsNonIncrementalProfile() {
+        XCTAssertTrue(ProviderProfile.qwenMTPlus().isQwenMTPlus)
+        XCTAssertFalse(ProviderProfile.qwenMTFlash().isQwenMTPlus)
+        XCTAssertFalse(ProviderProfile.defaultDeepSeek().isQwenMTPlus)
+    }
+
     func testMalformedJSONAndEmptyOutputErrors() {
         XCTAssertThrowsError(try ProviderResponseParser.parse(data: Data("nope".utf8), kind: .openAICompatible)) { error in
             XCTAssertEqual(error as? LLMProviderError, .malformedJSON)

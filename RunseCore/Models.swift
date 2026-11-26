@@ -157,6 +157,13 @@ public enum OutputLength: String, Codable, CaseIterable, Identifiable, Sendable 
     public var isQwenMT: Bool {
         model.hasPrefix("qwen-mt")
     }
+
+    /// M3: Plus streams non-incrementally (each chunk is the full
+    /// translation so far) while Flash is incremental. Only used to
+    /// pick the chunk-merging strategy in `HTTPProviderClient`.
+    public var isQwenMTPlus: Bool {
+        model == QwenMT.plusModel
+    }
 }
 
 @Model public final class PromptTemplate {

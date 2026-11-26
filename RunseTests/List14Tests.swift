@@ -9,7 +9,7 @@ final class List14Tests: XCTestCase {
 
     // MARK: - 清单 2: Qwen-MT request shape
 
-    func testQwenMTBodyHasSingleUserMessageAndExtraBody() {
+    func testQwenMTBodyHasSingleUserMessageAndTopLevelOptions() {
         let profile = ProviderProfile.qwenMTFlash()
         let request = LLMRequest(
             action: .translate,
@@ -25,8 +25,10 @@ final class List14Tests: XCTestCase {
         XCTAssertEqual(messages?.first?["role"] as? String, "user")
         XCTAssertEqual(messages?.first?["content"] as? String, "你好，世界")
         XCTAssertNil(body["temperature"], "Qwen-MT does not take a temperature parameter")
-        let extra = body["extra_body"] as? [String: Any]
-        let options = extra?["translation_options"] as? [String: Any]
+        // M2: translation_options is a top-level body field (official
+        // curl example); extra_body was a Python-SDK-only mechanism.
+        XCTAssertNil(body["extra_body"], "translation_options must not be nested under extra_body")
+        let options = body["translation_options"] as? [String: Any]
         XCTAssertEqual(options?["source_lang"] as? String, "auto")
         XCTAssertEqual(options?["target_lang"] as? String, "English")
         let terms = options?["terms"] as? [[String: String]]
@@ -43,7 +45,7 @@ final class List14Tests: XCTestCase {
             targetLanguage: "中文"
         )
         let body = ProviderRequestFactory.body(profile: profile, request: request)
-        let options = (body["extra_body"] as? [String: Any])?["translation_options"] as? [String: Any]
+        let options = body["translation_options"] as? [String: Any]
         XCTAssertEqual(options?["target_lang"] as? String, "Chinese")
         XCTAssertNil(options?["terms"], "No glossary terms means no terms key")
     }
