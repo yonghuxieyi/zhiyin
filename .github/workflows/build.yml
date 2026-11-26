@@ -1,8 +1,8 @@
 # 智音 CI: build the app unsigned and run the offline unit tests.
 #
 # Notes:
-# - Sophon needs swift-tools 6.2, so the runner must carry Xcode 26
-#   (Xcode 16 cannot build it). `macos-26` ships Xcode 26.
+# - The runner must carry Xcode 26 (the project targets the iOS 26
+#   SDK). `macos-26` ships Xcode 26.
 # - macOS runner minutes bill at 10x the Linux rate, so this workflow
 #   stays minimal: one build, one offline test run, one IPA artifact.
 # - The macos-26 runner's Xcode 26 ships without the iOS device

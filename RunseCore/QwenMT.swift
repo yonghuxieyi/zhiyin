@@ -58,8 +58,13 @@ public enum DashScopeStore {
     }
 
     public static func saveKey(_ key: String) async throws {
+        // Trim like ProviderKeyStore does: a pasted key with a
+        // trailing newline would otherwise break the Authorization
+        // header. An empty-after-trim key is not saved.
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
-        try await keychain.save(key, service: apiKeyService, account: account)
+        try await keychain.save(trimmed, service: apiKeyService, account: account)
     }
 
     public static func hasKey() async -> Bool {
@@ -78,8 +83,10 @@ public enum DashScopeStore {
     }
 
     public static func saveWorkspaceID(_ id: String) async throws {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
-        try await keychain.save(id, service: workspaceIDService, account: account)
+        try await keychain.save(trimmed, service: workspaceIDService, account: account)
     }
 }
 

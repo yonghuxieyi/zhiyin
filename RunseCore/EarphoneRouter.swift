@@ -60,11 +60,38 @@ public final class EarphoneRouter {
         started = true
         // AirPods disconnects / interruptions stop the engine; bring
         // it back so a long session survives them.
-        observers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] _ in
+        //
+        // Interruption handling is split by type: on `.began` (an
+        // incoming call, Siri, an alarm) the system has already
+        // stopped the engine — restarting here would fight it and
+        // fail. On `.ended` with `.shouldResume`, the session must
+        // be re-activated FIRST (the call deactivated it), and only
+        // then can the engine start again.
+        observers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] notification in
             guard let self, self.started else { return }
-            try? self.engine.start()
-            self.originalNode.play()
-            self.translationNode.play()
+            guard let userInfo = notification.userInfo,
+                  let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
+            switch type {
+            case .began:
+                // The system owns the audio session now; do nothing.
+                break
+            case .ended:
+                let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+                guard options.contains(.shouldResume) else { return }
+                do {
+                    try AVAudioSession.sharedInstance().setActive(true)
+                    try self.engine.start()
+                    self.originalNode.play()
+                    self.translationNode.play()
+                } catch {
+                    // The next route-change notification will retry
+                    // the restart; a failed start here is not fatal.
+                }
+            @unknown default:
+                break
+            }
         })
         observers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self, self.started else { return }

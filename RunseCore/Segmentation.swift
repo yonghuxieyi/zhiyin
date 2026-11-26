@@ -7,6 +7,11 @@ import Foundation
 /// (Chinese 。！？； and English . ! ?). Short pieces are merged up to
 /// `maxChars` per segment so the model sees whole context; a single
 /// sentence longer than `maxChars` is hard-split at the limit.
+///
+/// Blank lines are preserved as empty-string segments so the translated
+/// text keeps the original paragraph spacing when callers join the
+/// segments with "\n" (the pipeline passes empty segments through
+/// without calling the provider).
 public enum TextSegmenter {
     /// Default segment ceiling. DeepSeek allows far more per call, but
     /// shorter segments translate more consistently and show progress.
@@ -21,13 +26,22 @@ public enum TextSegmenter {
     }
 
     public static func segments(for text: String, maxChars: Int = defaultMaxChars) -> [String] {
-        let paragraphs = text
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+        let lines = text.components(separatedBy: .newlines)
         var result: [String] = []
-        for paragraph in paragraphs {
-            result.append(contentsOf: segments(forParagraph: paragraph, maxChars: maxChars))
+        var pendingBlank = false
+        for rawLine in lines {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty {
+                // Collapse runs of blank lines into one empty segment.
+                pendingBlank = true
+                continue
+            }
+            if pendingBlank, !result.isEmpty {
+                result.append("")
+                pendingBlank = false
+            }
+            pendingBlank = false
+            result.append(contentsOf: segments(forParagraph: line, maxChars: maxChars))
         }
         return result
     }
@@ -68,6 +82,12 @@ public enum TextSegmenter {
     /// Splits a paragraph into sentences, keeping each terminator with its
     /// sentence. Handles Chinese and English terminators, including closing
     /// quotes that follow a terminator.
+    ///
+    /// A "." is NOT a sentence end when it is part of a decimal
+    /// ("3.14"), a version number ("1.2.3"), a domain or URL
+    /// ("example.com", "www.foo.bar"), or a known abbreviation
+    /// ("U.S.", "Mr.", "e.g.", "a.m.") — those would otherwise be
+    /// chopped into nonsense pieces.
     public static func splitSentences(_ paragraph: String) -> [String] {
         let terminators: Set<Character> = ["。", "！", "？", "；", ".", "!", "?", ";"]
         let closingQuotes: Set<Character> = ["”", "’", "\"", "』", "」"]
@@ -78,7 +98,7 @@ public enum TextSegmenter {
         while index < characters.count {
             let char = characters[index]
             current.append(char)
-            if terminators.contains(char) {
+            if terminators.contains(char), isSentenceEnd(characters, at: index) {
                 // Attach trailing closing quotes to the same sentence.
                 var next = index + 1
                 while next < characters.count && closingQuotes.contains(characters[next]) {
@@ -96,6 +116,42 @@ public enum TextSegmenter {
             sentences.append(current)
         }
         return sentences
+    }
+
+    /// Decides whether the terminator at `index` ends a sentence.
+    /// Only "." needs the extra checks; every other terminator
+    /// always ends the sentence.
+    private static func isSentenceEnd(_ characters: [Character], at index: Int) -> Bool {
+        guard characters[index] == "." else { return true }
+        let next = index + 1 < characters.count ? characters[index + 1] : nil
+        let prev = index > 0 ? characters[index - 1] : nil
+        // Decimal / version: digit on both sides ("3.14", "1.2.3").
+        if let prev, let next, prev.isNumber, next.isNumber { return false }
+        // Domain / URL / abbreviation mid-word: a letter follows the
+        // dot with no space ("example.com", "U.S.A").
+        if let next, next.isLetter { return false }
+        // Known abbreviation immediately before the dot ("Mr.", "e.g.",
+        // "U.S.", "a.m."): look back at the word ending here.
+        if isAbbreviation(characters, endingAt: index) { return false }
+        return true
+    }
+
+    /// True when the word ending at the "." at `dotIndex` is a known
+    /// abbreviation (compared case-insensitively, dots stripped).
+    private static func isAbbreviation(_ characters: [Character], endingAt dotIndex: Int) -> Bool {
+        let abbreviations: Set<String> = [
+            "mr", "mrs", "ms", "dr", "st", "vs", "etc", "eg", "ie",
+            "am", "pm", "us", "usa", "uk", "jr", "sr", "prof", "no",
+            "approx", "fig", "eq", "al"
+        ]
+        var start = dotIndex - 1
+        while start >= 0, characters[start].isLetter || characters[start] == "." {
+            start -= 1
+        }
+        let word = String(characters[(start + 1)..<dotIndex])
+            .replacingOccurrences(of: ".", with: "")
+            .lowercased()
+        return abbreviations.contains(word)
     }
 }
 

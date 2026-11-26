@@ -54,9 +54,33 @@ public enum PromptRenderer {
         )
     }
 
+    /// Single-pass scan replacement. The old implementation ran one
+    /// `replacingOccurrences` pass per variable, so a value that itself
+    /// contained `{{...}}` (selected text often does) would be
+    /// re-scanned and wrongly substituted by a later pass. Here the
+    /// template is walked once and only placeholders present in the
+    /// original template are replaced; values are copied verbatim
+    /// and never re-scanned. Unknown placeholders are left as-is.
     private static func replace(in template: String, variables: [String: String]) -> String {
-        variables.reduce(template) { partial, item in
-            partial.replacingOccurrences(of: "{{\(item.key)}}", with: item.value)
+        var result = ""
+        result.reserveCapacity(template.count)
+        var cursor = template.startIndex
+        while let open = template[cursor...].range(of: "{{") {
+            result += template[cursor..<open.lowerBound]
+            guard let close = template[open.upperBound...].range(of: "}}") else {
+                // Unclosed "{{": copy the rest verbatim.
+                result += template[open.lowerBound...]
+                return result
+            }
+            let key = String(template[open.upperBound..<close.lowerBound])
+            if let value = variables[key] {
+                result += value
+            } else {
+                result += template[open.lowerBound..<close.upperBound]
+            }
+            cursor = close.upperBound
         }
+        result += template[cursor...]
+        return result
     }
 }

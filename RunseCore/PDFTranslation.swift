@@ -68,12 +68,17 @@ public struct PDFPageContent: Sendable {
     public var lines: [PDFTextLine]
     public var isScanned: Bool
     public var pageSize: CGSize
+    /// True when the Vision OCR pass for this page errored (as opposed
+    /// to simply finding no text). The UI reports it instead of
+    /// silently treating the page as blank.
+    public var ocrFailed: Bool
 
-    public init(index: Int, lines: [PDFTextLine], isScanned: Bool, pageSize: CGSize) {
+    public init(index: Int, lines: [PDFTextLine], isScanned: Bool, pageSize: CGSize, ocrFailed: Bool = false) {
         self.index = index
         self.lines = lines
         self.isScanned = isScanned
         self.pageSize = pageSize
+        self.ocrFailed = ocrFailed
     }
 
     public var plainText: String {
@@ -250,6 +255,16 @@ public enum PDFTranslation {
         return ["。", "！", "？", "!", "?", "…", "；", ";"].contains(last)
     }
 
+    /// A page counts as scanned when PDFKit finds no text on it, or
+    /// when the text it finds is only a few stray glyphs (a page
+    /// number, a watermark) covering almost none of the page — a
+    /// scanned image page with a tiny bit of embedded text. The
+    /// thresholds are deliberately conservative: real text pages
+    /// (even a title page) carry far more characters and coverage.
+    public static func looksScanned(charCount: Int, textCoverage: Double) -> Bool {
+        charCount < 30 && textCoverage < 0.01
+    }
+
     @MainActor
     public static func extractPages(from document: PDFDocument) async -> [PDFPageContent] {
         var result: [PDFPageContent] = []
@@ -262,8 +277,7 @@ public enum PDFTranslation {
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
             if textLines.isEmpty {
-                let ocrLines = await ocrPage(page, size: size)
-                result.append(PDFPageContent(index: index, lines: ocrLines, isScanned: true, pageSize: size))
+                result.append(await ocrContent(index: index, page: page, size: size))
                 continue
             }
             var lines: [PDFTextLine] = []
@@ -277,9 +291,32 @@ public enum PDFTranslation {
                 let bounds = box(for: line, on: page, in: rawText, searchFrom: &searchFrom) ?? .zero
                 lines.append(PDFTextLine(text: line, bounds: bounds))
             }
+            // Sparse text on a mostly-image page is a scanned page in
+            // disguise: OCR it instead of translating the stray glyphs.
+            let charCount = lines.reduce(0) { $0 + $1.text.count }
+            let pageArea = max(size.width * size.height, 1)
+            let textArea = lines.reduce(0.0) { $0 + $1.bounds.width * $1.bounds.height }
+            if looksScanned(charCount: charCount, textCoverage: textArea / pageArea) {
+                result.append(await ocrContent(index: index, page: page, size: size))
+                continue
+            }
             result.append(PDFPageContent(index: index, lines: lines, isScanned: false, pageSize: size))
         }
         return result
+    }
+
+    /// OCRs one page. A Vision failure is reported via `ocrFailed`
+    /// instead of being silently swallowed as an empty page; finding
+    /// no text at all is not a failure (the page may genuinely be
+    /// blank).
+    @MainActor
+    private static func ocrContent(index: Int, page: PDFPage, size: CGSize) async -> PDFPageContent {
+        do {
+            let ocrLines = try await ocrPage(page, size: size)
+            return PDFPageContent(index: index, lines: ocrLines, isScanned: true, pageSize: size)
+        } catch {
+            return PDFPageContent(index: index, lines: [], isScanned: true, pageSize: size, ocrFailed: true)
+        }
     }
 
     /// Finds `line` in the page's own text starting at `searchFrom`
@@ -300,13 +337,20 @@ public enum PDFTranslation {
     /// Vision's normalized top-left coordinates to PDF page
     /// coordinates (origin bottom-left). Main-actor isolated: it only
     /// runs from `extractPages`, which hands it a main-actor page.
+    /// Throws on a real OCR failure; finding no text at all returns
+    /// an empty list (not an error).
     @MainActor
-    private static func ocrPage(_ page: PDFPage, size: CGSize) async -> [PDFTextLine] {
+    private static func ocrPage(_ page: PDFPage, size: CGSize) async throws -> [PDFTextLine] {
         let scale: CGFloat = 2
         let renderSize = CGSize(width: size.width * scale, height: size.height * scale)
         let image = page.thumbnail(of: renderSize, for: .mediaBox)
         guard let cgImage = image.cgImage else { return [] }
-        let lines = (try? await VisionTextRecognizer.recognizeText(in: cgImage)) ?? []
+        let lines: [VisionTextRecognizer.Line]
+        do {
+            lines = try await VisionTextRecognizer.recognizeText(in: cgImage)
+        } catch VisionTextRecognizer.RecognizerError.noTextFound {
+            return []
+        }
         return lines.map { line in
             let box = line.boundingBox
             let pdfRect = CGRect(

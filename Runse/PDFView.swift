@@ -32,8 +32,19 @@ struct PDFView: View {
     @State private var resumeNote: String?
     @State private var dualCheckNote: String?
     @State private var exportURL: URL?
-    @State private var dualModelCheck = SettingsStore().dualModelCheckEnabled
     @State private var translationTask: Task<Void, Never>?
+
+    /// The dual-model switch reads/writes SettingsStore directly
+    /// instead of a `@State` snapshot: the old snapshot was
+    /// re-initialized (off) whenever the view was recreated, so
+    /// importing a document reset the switch the user had just
+    /// turned on.
+    private var dualModelCheckBinding: Binding<Bool> {
+        Binding(
+            get: { SettingsStore().dualModelCheckEnabled },
+            set: { SettingsStore().dualModelCheckEnabled = $0 }
+        )
+    }
 
     private let pipeline = TranslationPipeline()
 
@@ -47,7 +58,7 @@ struct PDFView: View {
                 }
                 .disabled(isWorking)
                 if !pages.isEmpty {
-                    Text("\(pages.count) 页 · 其中 \(pages.filter(\.isScanned).count) 页是扫描版（走 OCR）")
+                    Text("\(pages.count) 页 · 其中 \(pages.filter(\.isScanned).count) 页是扫描版（走 OCR）" + (pages.contains(where: \.ocrFailed) ? " · \(pages.filter(\.ocrFailed).count) 页 OCR 失败（文字没认出来）" : ""))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -55,10 +66,7 @@ struct PDFView: View {
 
             if document != nil {
                 Section("校对") {
-                    Toggle("双模型交叉校对（专业文档）", isOn: $dualModelCheck)
-                        .onChange(of: dualModelCheck) { _, value in
-                            SettingsStore().dualModelCheckEnabled = value
-                        }
+                    Toggle("双模型交叉校对（专业文档）", isOn: dualModelCheckBinding)
                     Text("平时默认关。打开后每段都由第二模型复核，分歧时按裁判规则选（术语命中优先）。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -246,16 +254,17 @@ struct PDFView: View {
             UIApplication.shared.isIdleTimerDisabled = false
         }
         do {
-            guard let profile = profiles.first(where: \.isDefault) ?? profiles.first else {
-                throw LLMProviderError.invalidURL
-            }
-            let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
-            let apiKey = try await keychain.load(service: KeychainStore.providerAPIKeyService, account: profile.id)
-            guard let apiKey, !apiKey.isEmpty else { throw LLMProviderError.missingAPIKey }
-            let template = templates.first { $0.action == .translate }
-                ?? PromptTemplate.builtIns().first { $0.action == .translate }!
-            let target = TextLanguage.detect(pages.first?.plainText ?? "").translationTarget
+            let request = try await TranslationRequestResolver.resolve(profiles: profiles, templates: templates)
+            let profile = request.profile
+            let apiKey = request.apiKey
+            let template = request.template
+            // Direction from the majority language of the WHOLE book,
+            // not just the first page: a cover or foreword in the
+            // other language used to flip the entire document.
+            let wholeBook = pages.map(\.plainText).joined(separator: "\n")
+            let target = TextLanguage.detect(wholeBook).translationTarget
             let tone = SettingsStore().translationTone
+            let dualModelCheck = SettingsStore().dualModelCheckEnabled
             let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
             var totalPrompt = 0
             var totalCompletion = 0
@@ -293,7 +302,7 @@ struct PDFView: View {
                     // and carry on.
                     do {
                         let segments = TextSegmenter.segments(for: para.text, maxChars: TextSegmenter.maxChars(for: profile))
-                        let results = try await pipeline.translate(
+                        let outcome = try await pipeline.translatePartial(
                             segments: segments,
                             profile: profile,
                             apiKey: apiKey,
@@ -306,7 +315,20 @@ struct PDFView: View {
                         ) { _, _ in }
                         totalPrompt += pipeline.lastUsage["prompt_tokens"] ?? 0
                         totalCompletion += pipeline.lastUsage["completion_tokens"] ?? 0
-                        var translation = results.map(\.translation).joined(separator: "\n")
+                        var translation = outcome.results.map(\.translation).joined(separator: "\n")
+                        if outcome.failedSegmentIndex != nil {
+                            // Part of the paragraph translated: keep
+                            // what finished, mark the paragraph failed
+                            // (cancellation is rethrown by the
+                            // pipeline, so it never lands here).
+                            failedParagraphs += 1
+                            tparas.append(PDFTranslatedParagraph(
+                                source: para.text,
+                                translation: translation.isEmpty ? para.text : translation,
+                                bounds: para.bounds, failed: true
+                            ))
+                            continue
+                        }
                         var check: DualModelCompare.Verdict?
                         if dualModelCheck, para.text.count >= 8 {
                             dualCheckAttempted = true
@@ -346,6 +368,10 @@ struct PDFView: View {
             }
             if failedParagraphs > 0 {
                 partialNote = "\(failedParagraphs) 段翻译失败，已保留原文并可导出；点“继续翻译”可只重试失败的段落。"
+            }
+            if pipeline.lastFallbackUsed {
+                let fallbackNote = "部分段落由 Qwen-MT 备用完成（主模型出错）。"
+                partialNote = [partialNote, fallbackNote].compactMap { $0 }.joined(separator: " ")
             }
             progress = ""
             let firstSource = pages.first?.plainText ?? ""

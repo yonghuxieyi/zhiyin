@@ -221,19 +221,23 @@ struct TranslateView: View {
         savedVocabIDs = []
         defer { isTranslating = false }
         do {
-            guard let profile = selectedProfile() else { throw LLMProviderError.invalidURL }
-            let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
-            let apiKey = try await keychain.load(service: KeychainStore.providerAPIKeyService, account: profile.id)
-            guard let apiKey, !apiKey.isEmpty else { throw LLMProviderError.missingAPIKey }
-            let template = templates.first { $0.action == .translate }
-                ?? PromptTemplate.builtIns().first { $0.action == .translate }!
+            let request = try await TranslationRequestResolver.resolve(
+                profiles: profiles, templates: templates,
+                profileID: selectedProfile()?.id
+            )
+            let profile = request.profile
+            let apiKey = request.apiKey
+            let template = request.template
             let parts = TextSegmenter.segments(for: inputText, maxChars: TextSegmenter.maxChars(for: profile))
             segments = parts.map { SegmentRow(source: $0) }
             if extractedCandidates.isEmpty { extractTerms() }
             let glossary = useGlossary ? glossaryEntries : []
             // Qwen-MT backup: only when the primary is not Qwen-MT itself.
             let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
-            let results = try await pipeline.translate(
+            // Partial outcome: a failed segment stops the run but the
+            // finished segments stay on screen, and the failed one is
+            // marked instead of the whole run being thrown away.
+            let outcome = try await pipeline.translatePartial(
                 segments: parts,
                 profile: profile,
                 apiKey: apiKey,
@@ -247,10 +251,15 @@ struct TranslateView: View {
                 segments[index].translation = partial
                 segments[index].isTranslating = true
             }
+            let results = outcome.results
             for (index, result) in results.enumerated() {
                 segments[index].translation = result.translation
                 segments[index].isTranslating = false
                 segments[index].isDone = true
+            }
+            if let failedIndex = outcome.failedSegmentIndex, let error = outcome.error {
+                segments[failedIndex].isTranslating = false
+                segments[failedIndex].error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
             fallbackUsed = pipeline.lastFallbackUsed
             let usage = pipeline.lastUsage
@@ -262,7 +271,9 @@ struct TranslateView: View {
                 model: profile.model,
                 action: .translate,
                 targetLanguage: targetLanguage,
-                status: pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success",
+                status: outcome.isComplete
+                    ? (pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success")
+                    : "partial · 第 \(outcome.failedSegmentIndex! + 1) 段失败",
                 promptTokens: usage["prompt_tokens"] ?? 0,
                 completionTokens: usage["completion_tokens"] ?? 0,
                 totalTokens: usage["total_tokens"] ?? 0

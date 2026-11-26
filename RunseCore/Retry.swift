@@ -1,9 +1,8 @@
 import Foundation
 
-/// Retry behavior for provider calls, mirroring SophonCore's
-/// `LLMRetryPolicy.default`: 3 attempts total, 0.8s base delay doubling to a
-/// 6s cap, `Retry-After` honored, 0–20% jitter, and no retry when the server
-/// asks for a wait longer than the cap.
+/// Retry behavior for provider calls: 3 attempts total, 0.8s base
+/// delay doubling to a 6s cap, `Retry-After` honored, 0–20% jitter,
+/// and no retry when the server asks for a wait longer than the cap.
 public struct RetryPolicy: Sendable, Equatable {
     public var maxAttempts: Int
     public var baseDelay: TimeInterval
@@ -71,7 +70,7 @@ public enum RetryClassifier {
         case .invalidStatus(let code, _, let retryAfter):
             let retryable = code == 429 || (500..<600).contains(code)
             return Decision(isRetryable: retryable, retryAfter: retryAfter)
-        case .missingAPIKey, .invalidURL, .malformedJSON, .emptyOutput:
+        case .missingAPIKey, .invalidURL, .malformedJSON, .emptyOutput, .unsupported:
             return Decision(isRetryable: false, retryAfter: nil)
         }
     }

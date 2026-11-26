@@ -20,27 +20,16 @@ settings:
 configFiles:
   Debug: Config/Local.example.xcconfig
   Release: Config/Local.example.xcconfig
-packages:
-  Sophon:
-    url: https://github.com/Luminoid/Sophon
-    # NOTE: tag 0.2.0 has no SophonOpenAI product (only SophonCore +
-    # SophonGemini), and XcodeGen has no commit pinning, so track main.
-    # Verified 2026-11-25: main is at fe795c9 (2026-10-10) and declares
-    # SophonOpenAI. Re-pin to a tag if one appears.
-    branch: "main"
-  SwiftAnthropic:
-    url: https://github.com/jamesrochabrun/SwiftAnthropic
-    from: "2.2.2"
+# No third-party packages: Sophon was never imported anywhere, and
+# the SwiftAnthropic path was dead code (no preset and no UI can
+# create an Anthropic-kind profile). Both were removed 2026-11-26;
+# the provider layer is plain URLSession now.
 targets:
   RunseCore:
     type: framework
     platform: iOS
     sources:
       - RunseCore
-    dependencies:
-      - package: Sophon
-        product: SophonOpenAI
-      - package: SwiftAnthropic
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.yonghuxieyi.zhiyin.core

@@ -18,24 +18,39 @@ public enum DualModelCompare {
         public var reason: String
         /// Whether the primary model's translation was kept.
         public var primaryWon: Bool
+        /// True when a human should review this paragraph: every
+        /// disagreement sets it. Two valid translations of the same
+        /// source routinely score below the 0.7 bigram threshold
+        /// (different wording, same meaning), so the old behaviour —
+        /// the referee silently picking one and the UI treating it as
+        /// settled — overstated the check. The referee still picks a
+        /// provisional winner, but the paragraph is flagged, not
+        /// blessed.
+        public var needsReview: Bool
 
-        public init(agreed: Bool, chosen: String, other: String, reason: String, primaryWon: Bool) {
+        public init(agreed: Bool, chosen: String, other: String, reason: String, primaryWon: Bool, needsReview: Bool = false) {
             self.agreed = agreed
             self.chosen = chosen
             self.other = other
             self.reason = reason
             self.primaryWon = primaryWon
+            self.needsReview = needsReview
         }
     }
 
     /// Bigram Jaccard similarity at or above this counts as agreement.
+    /// Kept at 0.7: two different-but-correct translations usually
+    /// land well below it, which is exactly why disagreement now only
+    /// flags the paragraph for human review instead of silently
+    /// crowning a winner.
     public static let agreementThreshold = 0.7
 
     /// Compares two translations of the same source. Pure function.
     /// Referee, in order: (1) a translation that respects more
     /// glossary terms wins; (2) a translation with a sane length wins
     /// over an empty or wildly off-length one; (3) otherwise the
-    /// primary model's translation is kept.
+    /// primary model's translation is kept. Every disagreement is
+    /// marked `needsReview` — the chosen text is provisional.
     public static func compare(
         primary: String,
         second: String,
@@ -50,10 +65,10 @@ public enum DualModelCompare {
             return Verdict(agreed: true, chosen: primary, other: second, reason: "两模型都没翻出内容。", primaryWon: true)
         }
         if primaryTrimmed.isEmpty {
-            return Verdict(agreed: false, chosen: second, other: primary, reason: "主模型没翻出内容，改用\(secondName)。", primaryWon: false)
+            return Verdict(agreed: false, chosen: second, other: primary, reason: "主模型没翻出内容，改用\(secondName)。（需人工复核）", primaryWon: false, needsReview: true)
         }
         if secondTrimmed.isEmpty {
-            return Verdict(agreed: false, chosen: primary, other: second, reason: "\(secondName)没翻出内容，保留\(primaryName)。", primaryWon: true)
+            return Verdict(agreed: false, chosen: primary, other: second, reason: "\(secondName)没翻出内容，保留\(primaryName)。（需人工复核）", primaryWon: true, needsReview: true)
         }
         let similarity = bigramSimilarity(primaryTrimmed, secondTrimmed)
         if similarity >= agreementThreshold {
@@ -63,19 +78,19 @@ public enum DualModelCompare {
         let secondHits = glossaryHits(in: secondTrimmed, glossary: glossary)
         if primaryHits != secondHits {
             if primaryHits > secondHits {
-                return Verdict(agreed: false, chosen: primary, other: second, reason: "有分歧：\(primaryName)术语命中 \(primaryHits) 个、\(secondName) \(secondHits) 个，选\(primaryName)。", primaryWon: true)
+                return Verdict(agreed: false, chosen: primary, other: second, reason: "有分歧：\(primaryName)术语命中 \(primaryHits) 个、\(secondName) \(secondHits) 个，暂选\(primaryName)。（需人工复核）", primaryWon: true, needsReview: true)
             }
-            return Verdict(agreed: false, chosen: second, other: primary, reason: "有分歧：\(secondName)术语命中 \(secondHits) 个、\(primaryName) \(primaryHits) 个，选\(secondName)。", primaryWon: false)
+            return Verdict(agreed: false, chosen: second, other: primary, reason: "有分歧：\(secondName)术语命中 \(secondHits) 个、\(primaryName) \(primaryHits) 个，暂选\(secondName)。（需人工复核）", primaryWon: false, needsReview: true)
         }
         let primaryLengthOK = saneLength(translation: primaryTrimmed, source: source)
         let secondLengthOK = saneLength(translation: secondTrimmed, source: source)
         if primaryLengthOK != secondLengthOK {
             if primaryLengthOK {
-                return Verdict(agreed: false, chosen: primary, other: second, reason: "有分歧：\(secondName)译文长度异常，选\(primaryName)。", primaryWon: true)
+                return Verdict(agreed: false, chosen: primary, other: second, reason: "有分歧：\(secondName)译文长度异常，暂选\(primaryName)。（需人工复核）", primaryWon: true, needsReview: true)
             }
-            return Verdict(agreed: false, chosen: second, other: primary, reason: "有分歧：\(primaryName)译文长度异常，选\(secondName)。", primaryWon: false)
+            return Verdict(agreed: false, chosen: second, other: primary, reason: "有分歧：\(primaryName)译文长度异常，暂选\(secondName)。（需人工复核）", primaryWon: false, needsReview: true)
         }
-        return Verdict(agreed: false, chosen: primary, other: second, reason: "有分歧：两者术语命中相同（\(primaryHits) 个），保留主模型\(primaryName)。", primaryWon: true)
+        return Verdict(agreed: false, chosen: primary, other: second, reason: "有分歧：两者术语命中相同（\(primaryHits) 个），暂保留主模型\(primaryName)。（需人工复核）", primaryWon: true, needsReview: true)
     }
 
     /// Character-bigram Jaccard similarity after normalizing

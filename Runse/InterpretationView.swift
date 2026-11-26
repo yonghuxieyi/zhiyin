@@ -346,7 +346,9 @@ struct InterpretationView: View {
                             .padding(.vertical, 2)
                             .background(segment.mode == .live ? Color.green.opacity(0.15) : Color.orange.opacity(0.15), in: Capsule())
                         if let latencyMs = segment.latencyMs {
-                            Text(String(format: "%.0f 毫秒", latencyMs))
+                            // Latency here is the translation delay: source
+                            // sentence started → first translation text.
+                            Text(String(format: "译文延迟 %.0f 毫秒", latencyMs))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -381,14 +383,10 @@ struct InterpretationView: View {
         UIApplication.shared.isIdleTimerDisabled = true
         let glossary = GlossaryAST.glossaryList(from: glossaryEntries)
         let translator: InterpretationEngine.Translator = { text, source, target, note in
-            guard let profile = profiles.first(where: \.isDefault) ?? profiles.first else {
-                throw LLMProviderError.invalidURL
-            }
-            let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
-            let apiKey = try await keychain.load(service: KeychainStore.providerAPIKeyService, account: profile.id)
-            guard let apiKey, !apiKey.isEmpty else { throw LLMProviderError.missingAPIKey }
-            let template = templates.first { $0.action == .translate }
-                ?? PromptTemplate.builtIns().first { $0.action == .translate }!
+            let request = try await TranslationRequestResolver.resolve(profiles: profiles, templates: templates)
+            let profile = request.profile
+            let apiKey = request.apiKey
+            let template = request.template
             let targetLanguage = target == .en ? "English" : "中文"
             let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
             let results = try await TranslationPipeline().translate(

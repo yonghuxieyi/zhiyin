@@ -149,14 +149,10 @@ struct PhotoView: View {
         didCopy = false
         defer { isWorking = false }
         do {
-            guard let profile = profiles.first(where: \.isDefault) ?? profiles.first else {
-                throw LLMProviderError.invalidURL
-            }
-            let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
-            let apiKey = try await keychain.load(service: KeychainStore.providerAPIKeyService, account: profile.id)
-            guard let apiKey, !apiKey.isEmpty else { throw LLMProviderError.missingAPIKey }
-            let template = templates.first { $0.action == .translate }
-                ?? PromptTemplate.builtIns().first { $0.action == .translate }!
+            let request = try await TranslationRequestResolver.resolve(profiles: profiles, templates: templates)
+            let profile = request.profile
+            let apiKey = request.apiKey
+            let template = request.template
             let target = TextLanguage.detect(recognizedText).translationTarget
             let parts = TextSegmenter.segments(for: recognizedText, maxChars: TextSegmenter.maxChars(for: profile))
             var partials = Array(repeating: "", count: parts.count)

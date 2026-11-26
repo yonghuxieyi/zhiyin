@@ -27,8 +27,10 @@ public struct InterpretationSegment: Sendable, Equatable, Identifiable {
     public var sourceText: String
     public var translationText: String
     public var speakerChanged: Bool
-    /// Latency of this sentence: first translation text after the
-    /// source sentence started, ms (live path only).
+    /// Translation delay of this sentence: wall-clock ms from the
+    /// source sentence starting to the FIRST translation text
+    /// arriving (live path only). This is the delay the user feels,
+    /// not how long the sentence took to speak.
     public var latencyMs: Double?
     /// Wall-clock creation time, for ordering segments across
     /// directions and modes.
@@ -90,11 +92,25 @@ public struct InterpretationSegmentAssembler: Sendable {
     private var mode: InterpretationSegment.Mode
     private var sessionStart: Date
     /// Wall-clock time the current source sentence started, for the
-    /// per-sentence latency sample.
+    /// per-sentence latency sample. Set by the first partial of a
+    /// sentence and kept until the latency is sampled (the
+    /// translation usually arrives AFTER the source sentence ends,
+    /// so clearing it at sourceFinal would lose the baseline).
     private var sourceSentenceStartedAt: Date?
+    /// True once the current source sentence has settled
+    /// (sourceFinal); the next partial then starts a new sentence
+    /// and re-arms the timestamp.
+    private var sourceSentenceEnded = false
+    /// Latency sampled when the first translation text arrives (see
+    /// `apply`): attached to the segment when it settles.
+    private var pendingLatencyMs: Double?
     /// Set by a Start event with spk_chg; applied to the next
-    /// appended segment, then cleared.
-    private var pendingSpeakerChanged = false
+    /// appended segment on the same side, then cleared. Kept separate
+    /// per side: the old single flag let a source-side speaker change
+    /// be consumed by a translation settle (or vice versa), marking
+    /// the wrong sentence as 换人.
+    private var pendingSourceSpeakerChanged = false
+    private var pendingTranslationSpeakerChanged = false
 
     public init(direction: InterpretationSegment.Direction, mode: InterpretationSegment.Mode = .live, sessionStart: Date = .now) {
         self.direction = direction
@@ -106,27 +122,47 @@ public struct InterpretationSegmentAssembler: Sendable {
         switch event {
         case .sourceStarted(let speakerChanged):
             // A new speaker's sentence replaces the draft on the next
-            // partial; the flag only marks the next settled segment.
-            if speakerChanged { pendingSpeakerChanged = true }
+            // partial; the flag only marks the next settled SOURCE
+            // segment.
+            if speakerChanged { pendingSourceSpeakerChanged = true }
         case .sourcePartial(let text):
-            if sourceDraft.isEmpty && sourceSentenceStartedAt == nil {
+            if sourceDraft.isEmpty && (sourceSentenceEnded || sourceSentenceStartedAt == nil) {
                 sourceSentenceStartedAt = .now
+                sourceSentenceEnded = false
             }
             sourceDraft = text
         case .sourceFinal(let text, let startMs, let endMs, let speakerChanged):
             sourceDraft = ""
-            let latency = sourceSentenceStartedAt.map { Date().timeIntervalSince($0) * 1000 }
-            sourceSentenceStartedAt = nil
-            appendSource(text: text, startMs: startMs, endMs: endMs, speakerChanged: speakerChanged || pendingSpeakerChanged, latencyMs: latency)
-            pendingSpeakerChanged = false
+            // Latency is NOT measured here: `now - startedAt` at this
+            // point is how long the sentence took to speak, not the
+            // translation delay. The real sample is taken when the
+            // first translation text arrives (below), so the timestamp
+            // stays until then.
+            sourceSentenceEnded = true
+            appendSource(text: text, startMs: startMs, endMs: endMs, speakerChanged: speakerChanged || pendingSourceSpeakerChanged)
+            pendingSourceSpeakerChanged = false
         case .translationStarted(let speakerChanged):
-            if speakerChanged { pendingSpeakerChanged = true }
+            if speakerChanged { pendingTranslationSpeakerChanged = true }
         case .translationPartial(let text):
+            // First translation text for this sentence: sample the
+            // delay from the source sentence starting. Only the first
+            // sample counts; later partials are the same sentence.
+            if !text.isEmpty, pendingLatencyMs == nil, let startedAt = sourceSentenceStartedAt {
+                pendingLatencyMs = Date().timeIntervalSince(startedAt) * 1000
+            }
             translationDraft = text
         case .translationFinal(let text, let startMs, let endMs, let speakerChanged):
             translationDraft = ""
-            appendTranslation(text: text, startMs: startMs, endMs: endMs, speakerChanged: speakerChanged || pendingSpeakerChanged)
-            pendingSpeakerChanged = false
+            // If no partial ever arrived, the final IS the first
+            // translation text — sample here instead.
+            if pendingLatencyMs == nil, let startedAt = sourceSentenceStartedAt {
+                pendingLatencyMs = Date().timeIntervalSince(startedAt) * 1000
+            }
+            appendTranslation(text: text, startMs: startMs, endMs: endMs, speakerChanged: speakerChanged || pendingTranslationSpeakerChanged, latencyMs: pendingLatencyMs)
+            pendingTranslationSpeakerChanged = false
+            pendingLatencyMs = nil
+            // Sampled (or unmeasurable): re-arm for the next sentence.
+            sourceSentenceStartedAt = nil
         case .sessionStarted, .ttsAudio, .ttsSentenceStarted, .ttsSentenceEnded, .muted, .usage, .sessionFinished, .failed:
             break
         }
@@ -149,14 +185,15 @@ public struct InterpretationSegmentAssembler: Sendable {
         (sourceDraft, translationDraft)
     }
 
-    private mutating func appendSource(text: String, startMs: Int64, endMs: Int64, speakerChanged: Bool, latencyMs: Double?) {
+    private mutating func appendSource(text: String, startMs: Int64, endMs: Int64, speakerChanged: Bool) {
         // Pair with the earliest segment that still lacks source text.
+        // Latency is sampled on the translation side, so a source
+        // settle never overwrites an existing sample.
         if let index = segments.firstIndex(where: { $0.translationText.isEmpty == false && $0.sourceText.isEmpty }) {
             segments[index].sourceText = text
             segments[index].sourceStartMs = startMs
             segments[index].sourceEndMs = endMs
             segments[index].speakerChanged = segments[index].speakerChanged || speakerChanged
-            segments[index].latencyMs = latencyMs
             return
         }
         segments.append(InterpretationSegment(
@@ -165,18 +202,18 @@ public struct InterpretationSegmentAssembler: Sendable {
             sourceStartMs: startMs,
             sourceEndMs: endMs,
             sourceText: text,
-            speakerChanged: speakerChanged,
-            latencyMs: latencyMs
+            speakerChanged: speakerChanged
         ))
     }
 
-    private mutating func appendTranslation(text: String, startMs: Int64, endMs: Int64, speakerChanged: Bool) {
+    private mutating func appendTranslation(text: String, startMs: Int64, endMs: Int64, speakerChanged: Bool, latencyMs: Double?) {
         // Pair with the earliest segment that still lacks translation.
         if let index = segments.firstIndex(where: { $0.sourceText.isEmpty == false && $0.translationText.isEmpty }) {
             segments[index].translationText = text
             segments[index].translationStartMs = startMs
             segments[index].translationEndMs = endMs
             segments[index].speakerChanged = segments[index].speakerChanged || speakerChanged
+            if let latencyMs { segments[index].latencyMs = latencyMs }
             return
         }
         segments.append(InterpretationSegment(
@@ -185,7 +222,8 @@ public struct InterpretationSegmentAssembler: Sendable {
             translationStartMs: startMs,
             translationEndMs: endMs,
             translationText: text,
-            speakerChanged: speakerChanged
+            speakerChanged: speakerChanged,
+            latencyMs: latencyMs
         ))
     }
 }

@@ -105,4 +105,21 @@ public enum GlossaryPrompt {
         let lines = fixed.map { "\($0.sourceTerm) -> \($0.targetTranslation)" }
         return "Terminology (translate these terms exactly this way every time they appear):\n" + lines.joined(separator: "\n")
     }
+
+    /// Only the terms that actually appear in `text` — injecting the
+    /// whole glossary into every segment wastes tokens and lets
+    /// unrelated terms leak into the translation. Matching is a plain
+    /// substring test (case-insensitive for Latin text, so "api"
+    /// matches "API"); Chinese terms match as-is.
+    public static func entries(for text: String, from entries: [GlossaryEntry]) -> [GlossaryEntry] {
+        let lowerText = text.lowercased()
+        return entries.filter { entry in
+            guard !entry.targetTranslation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !entry.sourceTerm.isEmpty else { return false }
+            if entry.sourceTerm.contains(where: { $0.isLetter && !$0.isASCII }) {
+                return text.contains(entry.sourceTerm)
+            }
+            return lowerText.contains(entry.sourceTerm.lowercased())
+        }
+    }
 }

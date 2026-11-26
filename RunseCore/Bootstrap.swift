@@ -7,30 +7,73 @@ public enum Bootstrap {
         let configuration: ModelConfiguration
         if inMemory {
             configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
-        } else if let groupURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: RunseConstants.appGroupID) {
-            configuration = ModelConfiguration(url: groupURL.appending(path: "Zhiyin.sqlite"))
+        } else if let url = databaseURL {
+            configuration = ModelConfiguration(url: url)
         } else {
             configuration = ModelConfiguration(schema: schema)
         }
         return try ModelContainer(for: schema, configurations: [configuration])
     }
 
+    /// The SQLite file, in the shared App Group container so the app
+    /// and its extensions read the same data.
+    public static var databaseURL: URL? {
+        FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: RunseConstants.appGroupID)?
+            .appending(path: "Zhiyin.sqlite")
+    }
+
+    /// Moves the database files (sqlite + -wal / -shm) into a
+    /// timestamped backup folder under Application Support and returns
+    /// the backup folder. Used when the container cannot be created:
+    /// the old data is never deleted silently.
+    @discardableResult
+    public static func backupDatabase() throws -> URL {
+        guard let url = databaseURL else {
+            throw NSError(domain: "Zhiyin.Bootstrap", code: 1, userInfo: [NSLocalizedDescriptionKey: "找不到数据库位置。"])
+        }
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let backupDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appending(path: "Zhiyin/Backups/\(stamp)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
+        for suffix in ["", "-wal", "-shm"] {
+            let source = URL(fileURLWithPath: url.path + suffix)
+            if FileManager.default.fileExists(atPath: source.path) {
+                try FileManager.default.moveItem(at: source, to: backupDir.appending(path: "Zhiyin.sqlite" + suffix))
+            }
+        }
+        return backupDir
+    }
+
+    /// Deletes the database files outright (after a backup attempt by
+    /// the caller). Only used from the recovery screen, at the user's
+    /// explicit request.
+    public static func deleteDatabaseFiles() throws {
+        guard let url = databaseURL else { return }
+        for suffix in ["", "-wal", "-shm"] {
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: url.path + suffix))
+        }
+    }
+
     @MainActor public static func seedDefaultsIfNeeded(context: ModelContext) throws {
+        // Insert-only: the old code overwrote the default profile's
+        // name, URL, model and headers on EVERY launch, wiping any
+        // edit the user had made to it (and forcing isDefault back
+        // on even after the user had picked another default). A
+        // missing default is inserted; an existing one is left alone.
+        // isDefault is only repaired when NO profile is default.
         let defaultProfileID = RunseConstants.defaultProfileID
         var providerDescriptor = FetchDescriptor<ProviderProfile>(predicate: #Predicate { $0.id == defaultProfileID })
         providerDescriptor.fetchLimit = 1
-        let defaultProvider = ProviderProfile.defaultDeepSeek()
-        if let existingProvider = try context.fetch(providerDescriptor).first {
-            existingProvider.name = defaultProvider.name
-            existingProvider.kind = defaultProvider.kind
-            existingProvider.baseURL = defaultProvider.baseURL
-            existingProvider.chatEndpoint = defaultProvider.chatEndpoint
-            existingProvider.model = defaultProvider.model
-            existingProvider.extraHeadersJSON = defaultProvider.extraHeadersJSON
-            existingProvider.isDefault = true
-            existingProvider.updatedAt = .now
+        if try context.fetch(providerDescriptor).first == nil {
+            context.insert(ProviderProfile.defaultDeepSeek())
         } else {
-            context.insert(defaultProvider)
+            var anyDefaultDescriptor = FetchDescriptor<ProviderProfile>(predicate: #Predicate { $0.isDefault })
+            anyDefaultDescriptor.fetchLimit = 1
+            if try context.fetch(anyDefaultDescriptor).first == nil,
+               let defaultProvider = try context.fetch(providerDescriptor).first {
+                defaultProvider.isDefault = true
+            }
         }
 
         // Precision-flip preset for long-form translation. Inserted once if
@@ -55,19 +98,13 @@ public enum Bootstrap {
             }
         }
 
+        // Insert-only, same reason: overwriting built-in templates
+        // on every launch wiped user edits to them.
         for template in PromptTemplate.builtIns() {
             let templateID = template.id
             var descriptor = FetchDescriptor<PromptTemplate>(predicate: #Predicate { $0.id == templateID })
             descriptor.fetchLimit = 1
-            if let existing = try context.fetch(descriptor).first {
-                if existing.isBuiltIn {
-                    existing.name = template.name
-                    existing.action = template.action
-                    existing.systemTemplate = template.systemTemplate
-                    existing.userTemplate = template.userTemplate
-                    existing.updatedAt = .now
-                }
-            } else {
+            if try context.fetch(descriptor).first == nil {
                 context.insert(template)
             }
         }

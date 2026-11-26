@@ -1,5 +1,4 @@
 import Foundation
-import SwiftAnthropic
 
 /// One glossary term, used to give a specialist model (Qwen-MT)
 /// server-side term intervention via `translation_options.terms`.
@@ -72,16 +71,32 @@ public enum LLMProviderError: Error, LocalizedError, Equatable {
     case invalidStatus(Int, String, TimeInterval?)
     case malformedJSON
     case emptyOutput
+    /// A provider kind no code path serves any more (the Anthropic
+    /// SDK path was removed: no preset and no UI can create an
+    /// Anthropic-kind profile, so it was dead code).
+    case unsupported(String)
 
+    /// Chinese messages: the UI shows `errorDescription` directly,
+    /// and the app is Chinese-first. 401/402/429 name the actual
+    /// problem (wrong key, empty balance, rate limit) instead of a
+    /// bare HTTP code.
     public var errorDescription: String? {
         switch self {
-        case .missingAPIKey: "Missing API key."
-        case .invalidURL: "Invalid provider URL."
-        case .timeout: "The provider request timed out."
-        case .connectionLost(let message): "Network connection lost: \(message)"
-        case .invalidStatus(let code, let body, _): "Provider returned HTTP \(code): \(body)"
-        case .malformedJSON: "The provider response was malformed."
-        case .emptyOutput: "The provider returned an empty result."
+        case .missingAPIKey: "没有配置 API Key，请先在设置里填写。"
+        case .invalidURL: "服务地址无效，请检查模型配置。"
+        case .timeout: "请求超时，请重试。"
+        case .connectionLost(let message): "网络断开：\(message)"
+        case .invalidStatus(let code, let body, _):
+            switch code {
+            case 401: "API Key 无效或已过期（401），请在设置里检查 Key。"
+            case 402: "余额不足或已欠费（402），请充值后重试。"
+            case 429: "请求太频繁（429），请稍等再试。"
+            case -1: body.isEmpty ? "请求失败。" : body
+            default: "服务返回 HTTP \(code)。\(body)"
+            }
+        case .malformedJSON: "服务返回的数据无法解析。"
+        case .emptyOutput: "服务返回了空结果。"
+        case .unsupported(let message): message
         }
     }
 }
@@ -139,7 +154,11 @@ public final class HTTPProviderClient: LLMProviderClient {
         case .openAICompatible:
             return try await streamOpenAIChat(request: request, onDelta: onDelta)
         case .anthropicMessages, .anthropicCompatible:
-            return try await streamAnthropicMessage(request: request, onDelta: onDelta)
+            // Removed with the SwiftAnthropic dependency: no preset and
+            // no UI can create an Anthropic-kind profile, so this path
+            // was unreachable dead code. Kept as an explicit error
+            // rather than silently mapping it to another API shape.
+            throw LLMProviderError.unsupported("该模型类型（Anthropic）暂未接入，请换 DeepSeek 或 Qwen-MT。")
         case .openAIResponses:
             // The Responses API has a substantially different schema. Keep the
             // existing one-shot path here; none of the bundled presets use it.
@@ -155,6 +174,11 @@ public final class HTTPProviderClient: LLMProviderClient {
             (bytes, response) = try await session.bytes(for: urlRequest)
         } catch let error as URLError where error.code == .timedOut {
             throw LLMProviderError.timeout
+        } catch is CancellationError {
+            // Never disguise cancellation as a provider error: the
+            // pipeline and the PDF cancel button test for it to stop
+            // cleanly instead of retrying or falling back.
+            throw CancellationError()
         } catch {
             throw mapStreamingError(error)
         }
@@ -165,6 +189,8 @@ public final class HTTPProviderClient: LLMProviderClient {
                 var errorData = Data()
                 for try await byte in bytes { errorData.append(byte) }
                 body = String(data: errorData, encoding: .utf8) ?? ""
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 throw mapStreamingError(error)
             }
@@ -216,70 +242,12 @@ public final class HTTPProviderClient: LLMProviderClient {
             }
         } catch let error as URLError where error.code == .timedOut {
             throw LLMProviderError.timeout
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw mapStreamingError(error)
         }
 
-        return try finalize(content: content, reasoning: reasoning, model: model, responseID: responseID, usage: usage)
-    }
-
-    @MainActor private func streamAnthropicMessage(request: LLMRequest, onDelta: (@MainActor (String) -> Void)?) async throws -> LLMResponse {
-        let basePath = anthropicBasePath()
-        let service = AnthropicServiceFactory.service(
-            apiKey: apiKey,
-            basePath: basePath,
-            betaHeaders: nil
-        )
-        let parameter = MessageParameter(
-            model: .other(request.model),
-            messages: [.init(role: .user, content: .text(request.userPrompt))],
-            // Anthropic requires maxTokens. 4096 matches the legacy default
-            // and is well within Claude 3+ output limits.
-            maxTokens: 4096,
-            system: .text(request.systemPrompt),
-            stream: true,
-            temperature: request.temperature
-        )
-
-        var content = ""
-        var reasoning = ""
-        var model: String?
-        var responseID: String?
-        var usage: [String: Int] = [:]
-
-        do {
-            let stream = try await service.streamMessage(parameter)
-            for try await event in stream {
-                if let message = event.message {
-                    responseID = message.id
-                    model = message.model
-                    let usageInfo = message.usage
-                    if let input = usageInfo.inputTokens { usage["input_tokens"] = input }
-                    usage["output_tokens"] = usageInfo.outputTokens
-                }
-                if let delta = event.delta {
-                    if let text = delta.text {
-                        content += text
-                        if let onDelta { onDelta(content) }
-                    }
-                    if let thinking = delta.thinking { reasoning += thinking }
-                }
-                if let usageInfo = event.usage {
-                    if let input = usageInfo.inputTokens { usage["input_tokens"] = input }
-                    usage["output_tokens"] = usageInfo.outputTokens
-                }
-                if event.streamEvent == .messageStop { break }
-            }
-        } catch let error as URLError where error.code == .timedOut {
-            throw LLMProviderError.timeout
-        } catch {
-            throw mapStreamingError(error)
-        }
-
-        if usage["total_tokens"] == nil {
-            let total = (usage["input_tokens"] ?? 0) + (usage["output_tokens"] ?? 0)
-            if total > 0 { usage["total_tokens"] = total }
-        }
         return try finalize(content: content, reasoning: reasoning, model: model, responseID: responseID, usage: usage)
     }
 
@@ -298,15 +266,6 @@ public final class HTTPProviderClient: LLMProviderClient {
             throw LLMProviderError.invalidStatus(http.statusCode, body, RetrySupport.retryAfterSeconds(from: http))
         }
         return try ProviderResponseParser.parse(data: data, kind: profile.kind)
-    }
-
-    private func anthropicBasePath() -> String {
-        // SwiftAnthropic appends "/v1/messages" to the basePath, so we just
-        // pass the scheme://host[:port] portion. Trim a trailing slash since
-        // some providers include it in their configured baseURL.
-        var base = profile.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        while base.hasSuffix("/") { base.removeLast() }
-        return base
     }
 
     private func finalize(content: String, reasoning: String, model: String?, responseID: String?, usage: [String: Int]) throws -> LLMResponse {
