@@ -142,7 +142,7 @@ public actor LiveInterpretClient {
             }
         } catch is CancellationError {
             await cancel()
-            throw
+            throw error
         }
         // D1: the loop above exits when the session starts — but a
         // stop() that landed in the same instant must still win over
