@@ -27,7 +27,14 @@ on:
 
 jobs:
   build:
-    runs-on: macos-26
+    # TEMPORARY 2026-11-26: macos-26 (arm64) stopped allocating runners
+    # entirely — 5 consecutive jobs failed in ~2s with runner_id 0, 0
+    # steps, no logs ("job was not acquired by Runner of type hosted").
+    # The Intel pool is a separate pool and still allocates. Same macOS
+    # 26 image / Xcode 26, only the runner CPU differs; the build is
+    # for a generic iOS device, so the artifact is unchanged. Switch
+    # back to macos-26 once the arm64 pool recovers.
+    runs-on: macos-26-intel
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
