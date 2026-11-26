@@ -64,6 +64,16 @@ struct FaceToFaceView: View {
     /// (21:33); the view picker switches to face-to-face.
     @State private var isSingleMode = true
     @State private var showingViewPicker = false
+    /// Item 8 (UI redesign): continuous mode, entered by long-pressing
+    /// the mic for 1 second (21:54, 22:59). Tap pauses / resumes in
+    /// continuous mode; long-press again exits. The streaming engine
+    /// itself arrives in item 9 — until then a turn uses the existing
+    /// one-shot listen → translate → speak loop and restarts itself.
+    @State private var isContinuousMode = false
+    @State private var isContinuousPaused = false
+    @State private var continuousSide: FaceSide = .me
+    @State private var continuousElapsed: TimeInterval = 0
+    @State private var continuousTickerTask: Task<Void, Never>?
 
     private var latestTurn: FaceTurn? { turns.last }
 
@@ -95,10 +105,25 @@ struct FaceToFaceView: View {
         .sheet(isPresented: $showingViewPicker) {
             ConversationViewPicker(isSingleMode: $isSingleMode)
         }
+        // Item 8: switching single / face-to-face ends a continuous
+        // session — its controls live on the mic of the current mode.
+        .onChange(of: isSingleMode) { _, _ in
+            if isContinuousMode {
+                stopContinuousMode()
+            }
+        }
         .task {
             config = await VolcanoVoiceStore.load()
         }
         .onDisappear {
+            // Item 8: leaving the page ends the continuous session
+            // (21:58: exiting closes voice) and stops its timer.
+            if isContinuousMode {
+                isContinuousMode = false
+                isContinuousPaused = false
+                continuousElapsed = 0
+                stopContinuousTicker()
+            }
             // N6: leaving the page must stop the mic / ASR socket,
             // or recording keeps uploading with no UI and the mic
             // indicator stays on.
@@ -157,19 +182,11 @@ struct FaceToFaceView: View {
                         Label("重播", systemImage: "speaker.wave.2")
                     }
                     .buttonStyle(.bordered)
-                    .disabled(latestTurn == nil || isWorking)
+                    // Item 8: replay would talk over a live continuous
+                    // session, so it is off while one is running.
+                    .disabled(latestTurn == nil || isWorking || isContinuousMode)
                     Spacer()
-                    Button {
-                        toggleTask = Task { await toggleSingleListening() }
-                    } label: {
-                        Image(systemName: listeningSide != nil ? "stop.fill" : "mic.fill")
-                            .font(.title2)
-                            .frame(width: 72, height: 72)
-                            .background(Color.accentColor, in: Circle())
-                            .foregroundStyle(.white)
-                    }
-                    .disabled(isWorking)
-                    .accessibilityLabel(listeningSide != nil ? "停止" : "开始说话")
+                    singleMicButton
                     Spacer()
                     if isWorking {
                         Button {
@@ -346,6 +363,159 @@ struct FaceToFaceView: View {
         await toggleListening(side: .me)
     }
 
+    /// Item 8: the single-mode mic. Tap starts / stops (21:58);
+    /// long-press 1 second enters / exits continuous mode (21:54,
+    /// 22:59); in continuous mode tap pauses / resumes. Tap and
+    /// long-press are exclusive gestures — a quick tap never fires
+    /// the long-press, and a 1-second hold never fires the tap.
+    private var singleMicButton: some View {
+        Group {
+            if isContinuousMode {
+                // 23:49: in continuous mode the mic icon becomes the
+                // elapsed time, digits only.
+                VStack(spacing: 2) {
+                    if isContinuousPaused {
+                        // 00:20 (final): paused — time at the top of
+                        // the button, the enlarged pause glyph
+                        // centered below it. The translucent-overlay
+                        // and arc versions are void.
+                        Text(continuousTimeText)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Image(systemName: "pause.fill")
+                            .font(.system(size: 34))
+                    } else {
+                        Text(continuousTimeText)
+                            .font(.title3)
+                            .fontWeight(.semibold)
+                    }
+                }
+                .frame(width: 96, height: 96)
+                .background(Color.accentColor, in: Circle())
+                .foregroundStyle(.white)
+            } else {
+                Image(systemName: listeningSide != nil ? "stop.fill" : "mic.fill")
+                    .font(.title2)
+                    .frame(width: 72, height: 72)
+                    .background(Color.accentColor, in: Circle())
+                    .foregroundStyle(.white)
+            }
+        }
+        .onTapGesture {
+            if isContinuousMode {
+                toggleContinuousPause()
+            } else if !isWorking {
+                toggleTask = Task { await toggleSingleListening() }
+            }
+        }
+        .onLongPressGesture(minimumDuration: 1.0) {
+            if isContinuousMode {
+                stopContinuousMode()
+            } else {
+                startContinuousMode(side: .me)
+            }
+        }
+        .accessibilityLabel(singleMicLabel)
+        .accessibilityAddTraits(.isButton)
+    }
+
+    private var singleMicLabel: String {
+        if isContinuousMode {
+            return isContinuousPaused ? "继续连续对话" : "暂停连续对话"
+        }
+        return listeningSide != nil ? "停止" : "开始说话"
+    }
+
+    /// Item 8: elapsed time in the continuous-mode button, "0:26" style.
+    private var continuousTimeText: String {
+        let total = Int(continuousElapsed)
+        return "\(total / 60):\(String(format: "%02d", total % 60))"
+    }
+
+    /// Item 8: haptics for the mic (23:53) — medium on entering
+    /// continuous mode, light on pause / resume.
+    private func micHaptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
+        UIImpactFeedbackGenerator(style: style).impactOccurred()
+    }
+
+    /// Item 8: long-press (1s) enters continuous mode (21:54, 22:59).
+    @MainActor
+    private func startContinuousMode(side: FaceSide) {
+        guard !isContinuousMode, !isWorking else { return }
+        micHaptic(.medium)
+        continuousSide = side
+        isContinuousMode = true
+        isContinuousPaused = false
+        continuousElapsed = 0
+        startContinuousTicker()
+        toggleTask = Task { await toggleListening(side: side) }
+    }
+
+    /// Item 8: long-press again stops continuous mode (21:54).
+    @MainActor
+    private func stopContinuousMode() {
+        guard isContinuousMode else { return }
+        isContinuousMode = false
+        isContinuousPaused = false
+        continuousElapsed = 0
+        stopContinuousTicker()
+        if listeningSide != nil {
+            toggleTask = Task { await stopListening() }
+        }
+    }
+
+    /// Item 8: tap in continuous mode pauses / resumes (21:54).
+    /// Pausing finishes the current utterance (its content is kept)
+    /// and does not start the next turn until resumed.
+    @MainActor
+    private func toggleContinuousPause() {
+        guard isContinuousMode else { return }
+        micHaptic(.light)
+        if isContinuousPaused {
+            isContinuousPaused = false
+            startContinuousTicker()
+            // If a turn is still translating, its end restarts
+            // listening via maybeContinueContinuous — starting a
+            // second session now would hear the speaker.
+            if listeningSide == nil && !isWorking {
+                toggleTask = Task { await toggleListening(side: continuousSide) }
+            }
+        } else {
+            isContinuousPaused = true
+            stopContinuousTicker()
+            if listeningSide != nil {
+                toggleTask = Task { await stopListening() }
+            }
+        }
+    }
+
+    /// Item 8: after a turn ends, continuous mode starts the next
+    /// turn automatically (until paused / exited). The streaming
+    /// engine itself arrives in item 9.
+    @MainActor
+    private func maybeContinueContinuous() async {
+        guard isContinuousMode, !isContinuousPaused, !Task.isCancelled else { return }
+        await toggleListening(side: continuousSide)
+    }
+
+    @MainActor
+    private func startContinuousTicker() {
+        continuousTickerTask?.cancel()
+        continuousTickerTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                continuousElapsed += 1
+            }
+        }
+    }
+
+    @MainActor
+    private func stopContinuousTicker() {
+        continuousTickerTask?.cancel()
+        continuousTickerTask = nil
+    }
+
     @MainActor
     private func toggleListening(side: FaceSide) async {
         if listeningSide == side {
@@ -392,7 +562,13 @@ struct FaceToFaceView: View {
             await asrClient?.cancel()
             asrClient = nil
             listeningSide = nil
-            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            // Item 8: a cancel while (re)starting listening stops
+            // quietly instead of showing a cancellation error — the
+            // auto-restarted listen runs while isWorking is still
+            // true, so the 取消 button can hit it.
+            if !(error is CancellationError) {
+                errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
         }
     }
 
@@ -411,6 +587,9 @@ struct FaceToFaceView: View {
         recorder.stop()
         guard let client = asrClient else {
             listeningSide = nil
+            // Item 8: nothing was listening — a continuous session
+            // still starts its next turn from here.
+            await maybeContinueContinuous()
             return
         }
         asrClient = nil
@@ -430,6 +609,9 @@ struct FaceToFaceView: View {
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
+        // Item 8: a finished turn restarts listening while the
+        // continuous session is running and not paused.
+        await maybeContinueContinuous()
     }
 
     @MainActor
