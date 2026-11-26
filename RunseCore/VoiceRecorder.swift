@@ -5,7 +5,16 @@ import Foundation
 /// streaming ASR client. The tap callback runs on a realtime thread, so
 /// chunks are handed out through an `AsyncStream` continuation, which is
 /// thread-safe, instead of touching UI state directly.
-public final class VoiceRecorder {
+/// N7 跟进修：start() 是非隔离 async 方法，从 @MainActor 的
+/// InterpretationEngine（feed Task）和两个页面里 await 它时，
+/// recorder 要跨隔离域发送；VoiceRecorder 不是 Sendable，
+/// Swift 6 报 sending 'self.recorder' risks data races。
+/// 标 @unchecked Sendable：同一时间只有一个持有者在用，
+/// start/stop 由持有方串行发起；唯一跨线程的触碰是录音 tap
+/// 回调，只通过线程安全的 AsyncStream continuation yield
+/// 数据，converter 在装 tap、启动引擎前就已设好、tap 运行
+/// 期间不再改；AVAudioEngine 的 start/stop 本身线程安全。
+public final class VoiceRecorder: @unchecked Sendable {
     public enum RecorderError: Error, LocalizedError {
         case noInputNode
         case cannotStart(Error)
