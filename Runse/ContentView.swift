@@ -461,6 +461,14 @@ struct SettingsView: View {
     @State private var providerKeyConfigured = false
     @State private var providerKeySaved = false
     @State private var providerKeyError: String?
+    /// Item 14 (UI redesign): voice choice / speed / my voice live
+    /// in Settings now (the old voice tab is gone) — same
+    /// VoiceSettings store as the voice page used, so both stay in
+    /// sync. hasMyVoice gates the "use my voice" toggle.
+    @State private var speakerID = VoiceSettings().speakerID
+    @State private var speechRate = VoiceSettings().speechRate
+    @State private var useMyVoice = VoiceSettings().useMyVoice
+    @State private var hasMyVoice = false
     /// S6: a keychain read fault is not "not configured" — when set,
     /// the settings page says so instead of showing 未配置.
     @State private var keychainReadError: String?
@@ -678,6 +686,52 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("声音") {
+                    Picker("声音", selection: $speakerID) {
+                        Section("女声") {
+                            ForEach(DoubaoSpeaker.all.filter { $0.gender == .female }) { speaker in
+                                Text(speaker.name).tag(speaker.id)
+                            }
+                        }
+                        Section("男声") {
+                            ForEach(DoubaoSpeaker.all.filter { $0.gender == .male }) { speaker in
+                                Text(speaker.name).tag(speaker.id)
+                            }
+                        }
+                    }
+                    .onChange(of: speakerID) { _, value in
+                        var settings = VoiceSettings()
+                        settings.speakerID = value
+                    }
+                    HStack {
+                        Text("语速")
+                        Slider(value: $speechRate, in: 0.5...2.0, step: 0.05)
+                            .onChange(of: speechRate) { _, value in
+                                var settings = VoiceSettings()
+                                settings.speechRate = value
+                            }
+                        Text("×\(String(format: "%.2f", speechRate))")
+                            .monospacedDigit()
+                    }
+                }
+
+                Section("我的声音") {
+                    NavigationLink("我的声音") {
+                        MyVoiceView()
+                    }
+                    Toggle("用我的声音朗读", isOn: $useMyVoice)
+                        .disabled(!hasMyVoice)
+                        .onChange(of: useMyVoice) { _, value in
+                            var settings = VoiceSettings()
+                            settings.useMyVoice = value
+                        }
+                    if !hasMyVoice {
+                        Text("录 10–30 秒就能复刻自己的声音。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Qwen-MT 备用") {
                     HStack {
                         Text("DashScope Key")
@@ -762,6 +816,13 @@ struct SettingsView: View {
                     NavigationLink("生词本") {
                         VocabView()
                     }
+                    // Item 14: glossary lives in Settings now. The
+                    // editor shows the stored entries; candidates
+                    // (terms extracted from input text) only come from
+                    // the translate page, so here it is an empty list.
+                    NavigationLink("术语表") {
+                        GlossaryEditorView(candidates: [])
+                    }
                 }
 
                 Section("DeepSeek 花费") {
@@ -814,6 +875,9 @@ struct SettingsView: View {
                     }
                 }
             }
+            // Item 14 (UI redesign): card-style Settings, Apple
+            // style — rounded inset-grouped cards.
+            .listStyle(.insetGrouped)
             .navigationTitle("设置")
             .sheet(isPresented: $showingGetStarted) {
                 GetStartedGuideView {
@@ -824,6 +888,9 @@ struct SettingsView: View {
                 ModelPickerSheet()
             }
             .task {
+                // Item 14: whether a cloned voice exists gates the
+                // "use my voice" toggle.
+                hasMyVoice = await QwenVoiceStore.loadVoiceID() != nil
                 // S25: surface a recorded seeding failure, if any.
                 seedFailure = BootstrapSeedStatus.load()
                 // S6: throwing loads — a keychain fault must surface
