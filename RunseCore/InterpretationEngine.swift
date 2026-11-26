@@ -202,7 +202,8 @@ public final class InterpretationEngine: ObservableObject {
         let pausedFor = pausedAt.map { Date().timeIntervalSince($0) } ?? 0
         pausedAt = nil
         if mode == .live {
-            let anyConnected = (forwardClient?.isConnected ?? false) || (reverseClient?.isConnected ?? false)
+            // LiveInterpretClient is an actor: isConnected needs await.
+            let anyConnected = (await forwardClient?.isConnected ?? false) || (await reverseClient?.isConnected ?? false)
             if pausedFor > 60 || !anyConnected {
                 await startLiveSessions()
                 return
