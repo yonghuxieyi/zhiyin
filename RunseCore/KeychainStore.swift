@@ -73,6 +73,41 @@ public final class KeychainStore: SecretStore {
     }
 }
 
+/// Provider API keys (DeepSeek etc.) in the keychain, service
+/// `Zhiyin.ProviderAPIKey`, account = provider profile id.
+/// M1: before this there was no UI anywhere that saved a key under
+/// this service — only loads — so the app could never call DeepSeek
+/// after install. Keys are trimmed before saving: a pasted key with
+/// a trailing newline would otherwise break the Authorization header.
+public enum ProviderKeyStore {
+    public static func normalized(_ raw: String) -> String? {
+        let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return key.isEmpty ? nil : key
+    }
+
+    public static func loadKey(profileID: String) async -> String? {
+        let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
+        guard let key = try? await keychain.load(service: KeychainStore.providerAPIKeyService, account: profileID),
+              !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return key
+    }
+
+    public static func saveKey(_ raw: String, profileID: String) async throws {
+        guard let key = normalized(raw) else { return }
+        let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
+        try await keychain.save(key, service: KeychainStore.providerAPIKeyService, account: profileID)
+    }
+
+    public static func hasKey(profileID: String) async -> Bool {
+        await loadKey(profileID: profileID) != nil
+    }
+
+    public static func deleteKey(profileID: String) async throws {
+        let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
+        try await keychain.delete(service: KeychainStore.providerAPIKeyService, account: profileID)
+    }
+}
+
 public enum KeychainAccessGroup {
     public static func make(appIdentifierPrefix: String) -> String? {
         let prefix = appIdentifierPrefix.trimmingCharacters(in: .whitespacesAndNewlines)

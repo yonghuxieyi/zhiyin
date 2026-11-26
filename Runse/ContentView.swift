@@ -380,12 +380,39 @@ struct SettingsView: View {
     @State private var dashScopeError: String?
     @State private var dashScopeWorkspaceID = ""
     @State private var workspaceSaved = false
+    @State private var providerKey = ""
+    @State private var providerKeyConfigured = false
+    @State private var providerKeySaved = false
+    @State private var providerKeyError: String?
     @Query(sort: \TransformHistory.timestamp, order: .reverse) private var historyItems: [TransformHistory]
     private let settings = SettingsStore()
 
     private var currentModelName: String {
         ModelCatalog.option(id: settings.selectedModelOptionID, voiceConfigured: voiceConfigured, qwenConfigured: qwenConfigured)?.name
             ?? "DeepSeek 日常"
+    }
+
+    /// SwiftData profile id backing the currently selected model option.
+    /// Qwen-MT options use the DashScope key (see the Qwen-MT section
+    /// below); every other profile uses its own key under
+    /// `Zhiyin.ProviderAPIKey` (M1).
+    private var currentProfileID: String? {
+        ModelCatalog.option(id: settings.selectedModelOptionID, voiceConfigured: voiceConfigured, qwenConfigured: qwenConfigured)?.profileID
+    }
+
+    private var isCurrentModelQwenMT: Bool {
+        guard let id = currentProfileID else { return false }
+        return id == QwenMT.flashProfileID || id == QwenMT.plusProfileID
+    }
+
+    private func refreshProviderKeyStatus() {
+        Task {
+            if let profileID = currentProfileID, !isCurrentModelQwenMT {
+                providerKeyConfigured = await ProviderKeyStore.hasKey(profileID: profileID)
+            } else {
+                providerKeyConfigured = false
+            }
+        }
     }
 
     private var spend: SpendCalculator.Summary {
@@ -406,6 +433,54 @@ struct SettingsView: View {
                         showingModelPicker = true
                     } label: {
                         Label("选择模型", systemImage: "cpu")
+                    }
+                    // M1: the app previously had no way to save a
+                    // DeepSeek key at all — only loads — so the main
+                    // model could never be called after install.
+                    if isCurrentModelQwenMT {
+                        Text("Qwen-MT 用下面的 DashScope Key，不用在这里填。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else if let profileID = currentProfileID {
+                        HStack {
+                            Text("API Key")
+                            Spacer()
+                            Text(providerKeyConfigured ? "已配置" : "未配置")
+                                .foregroundStyle(providerKeyConfigured ? .green : .orange)
+                        }
+                        SecureField("粘贴当前模型的 API Key", text: $providerKey)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        Button("保存 Key") {
+                            Task {
+                                guard let key = ProviderKeyStore.normalized(providerKey) else { return }
+                                do {
+                                    try await ProviderKeyStore.saveKey(key, profileID: profileID)
+                                    providerKeyConfigured = true
+                                    providerKeySaved = true
+                                    providerKeyError = nil
+                                    providerKey = ""
+                                } catch {
+                                    providerKeyError = "保存失败：\(error.localizedDescription)"
+                                }
+                            }
+                        }
+                        .disabled(ProviderKeyStore.normalized(providerKey) == nil)
+                        if providerKeySaved {
+                            Text("已保存到钥匙串。Key 只存手机钥匙串，不进代码。")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let providerKeyError {
+                            Text(providerKeyError)
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                        }
+                        if !providerKeyConfigured {
+                            Text("没配 Key 时翻译会报“缺少 API Key”，先在这里粘贴保存。")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
 
@@ -554,6 +629,10 @@ struct SettingsView: View {
                 voiceConfigured = config != nil
                 qwenConfigured = await DashScopeStore.hasKey()
                 dashScopeWorkspaceID = await DashScopeStore.loadWorkspaceID() ?? ""
+                refreshProviderKeyStatus()
+            }
+            .onChange(of: showingModelPicker) { _, isShowing in
+                if !isShowing { refreshProviderKeyStatus() }
             }
         }
     }

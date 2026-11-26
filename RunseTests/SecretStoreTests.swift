@@ -17,6 +17,14 @@ final class SecretStoreTests: XCTestCase {
         XCTAssertEqual(accessGroup, "TEAMID1234.com.yonghuxieyi.zhiyin.keychain")
     }
 
+    func testProviderKeyStoreTrimsPastedKeys() {
+        // M1: pasting a key with a trailing newline must not be saved
+        // as-is — it would break the Authorization header.
+        XCTAssertEqual(ProviderKeyStore.normalized("  sk-test-123\n"), "sk-test-123")
+        XCTAssertNil(ProviderKeyStore.normalized("   \n"))
+        XCTAssertNil(ProviderKeyStore.normalized(""))
+    }
+
     func testProviderAPIKeyServiceConstant() {
         // Provider keys live in the keychain under one service name; the app
         // and the extension must agree on it.
