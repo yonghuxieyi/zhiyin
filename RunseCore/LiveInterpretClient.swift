@@ -71,6 +71,13 @@ public actor LiveInterpretClient {
         self.session = session
     }
 
+    /// M10: whether the WebSocket is up and the session actually
+    /// started (not finished). Used on resume to decide whether the
+    /// paused session can continue or must be rebuilt.
+    public var isConnected: Bool {
+        task?.state == .running && sessionStarted && !sessionFinished
+    }
+
     /// Connects and starts the session. Returns the event stream only
     /// after SessionStarted arrives (audio must not be sent before it).
     /// Throws on handshake failure, session failure, or a 10s timeout.

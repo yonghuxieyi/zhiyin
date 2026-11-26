@@ -127,6 +127,18 @@ public final class InterpretationEngine: ObservableObject {
     private var fallbackTranslated: [String] = []
     private var fallbackTask: Task<Void, Never>?
     private var autoRetried = false
+    /// M7: generation counter for live sessions. Every
+    /// `startLiveSessions` bumps it; event tasks and stream-end
+    /// callbacks carry the generation they were started with, and
+    /// anything from an older generation is ignored — otherwise an
+    /// old session's teardown could kill a freshly started one.
+    private var sessionGeneration = 0
+    /// M10: when the session was paused, to decide on resume whether
+    /// the socket is too stale to continue.
+    private var pausedAt: Date?
+    /// M10: consecutive live `sendAudio` failures; hitting the
+    /// threshold falls back instead of going silently dead.
+    private var consecutiveSendFailures = 0
 
     public init(quotaStore: InterpretationQuotaStore = InterpretationQuotaStore()) {
         self.quotaStore = quotaStore
@@ -174,6 +186,7 @@ public final class InterpretationEngine: ObservableObject {
         guard phase == .live || phase == .fallback else { return }
         isPaused = true
         phase = .paused
+        pausedAt = .now
         recorder.stop()
         router.stop()
     }
@@ -181,6 +194,20 @@ public final class InterpretationEngine: ObservableObject {
     public func resume() async {
         guard phase == .paused else { return }
         isPaused = false
+        // M10: a paused live session may be a dead socket — the
+        // WebSocket can time out while paused and `sendAudio` would
+        // then fail silently. If paused over 60s, or neither live
+        // client is still connected, rebuild the session instead of
+        // resuming a dead one.
+        let pausedFor = pausedAt.map { Date().timeIntervalSince($0) } ?? 0
+        pausedAt = nil
+        if mode == .live {
+            let anyConnected = (forwardClient?.isConnected ?? false) || (reverseClient?.isConnected ?? false)
+            if pausedFor > 60 || !anyConnected {
+                await startLiveSessions()
+                return
+            }
+        }
         phase = mode == .live ? .live : .fallback
         try? router.start()
         startAudioFeed()
@@ -259,6 +286,13 @@ public final class InterpretationEngine: ObservableObject {
     private func startLiveSessions() async {
         guard let config else { return }
         phase = .connecting
+        // M7: bump the generation first. The old event tasks are
+        // cancelled below, but their stream-end callbacks can still
+        // fire afterwards — they carry the old generation and are
+        // ignored in handleLiveStreamEnded / handleLiveEvent.
+        sessionGeneration += 1
+        let generation = sessionGeneration
+        consecutiveSendFailures = 0
         // Tear down any previous live sessions (retry / lock change).
         for task in eventTasks { task.cancel() }
         eventTasks = []
@@ -291,12 +325,12 @@ public final class InterpretationEngine: ObservableObject {
                     reverseClient = client
                     reverseAssembler = InterpretationSegmentAssembler(direction: .enToZh)
                 }
-                eventTasks.append(Task { [weak self] in
+                eventTasks.append(Task { [weak self, generation] in
                     guard let self else { return }
                     for await event in stream {
-                        await self.handleLiveEvent(event, isForward: isForward)
+                        await self.handleLiveEvent(event, isForward: isForward, generation: generation)
                     }
-                    await self.handleLiveStreamEnded()
+                    await self.handleLiveStreamEnded(generation: generation)
                 })
                 startedAny = true
                 startedCount += 1
@@ -310,6 +344,10 @@ public final class InterpretationEngine: ObservableObject {
             phase = isPaused ? .paused : .live
             grantPending = false
             fallbackReason = nil
+            // Back on live: allow one automatic retry again if this
+            // session drops later. (Only reset on success — resetting
+            // on failure would loop the 30s retry forever.)
+            autoRetried = false
             if startedCount < directions.count {
                 let detail = lastError ?? "未知原因"
                 errorMessage = "其中一个方向连接失败（\(detail)，仅单向运行。"
@@ -360,12 +398,39 @@ public final class InterpretationEngine: ObservableObject {
         if isPaused { return }
         if firstAudioSentAt == nil { firstAudioSentAt = .now }
         if mode == .live {
-            try? await forwardClient?.sendAudio(chunk)
-            try? await reverseClient?.sendAudio(chunk)
+            await sendLiveAudio(chunk)
         } else if let asrClient {
             try? await asrClient.sendAudio(chunk)
         }
         router.playOriginal(pcm: chunk)
+    }
+
+    /// M10: sends one audio chunk to the live session(s), counting
+    /// consecutive failures. The old code swallowed send errors with
+    /// `try?`, so a dead socket went silently quiet instead of
+    /// falling back. Five consecutive failures (~half a second of
+    /// audio) trigger the fallback.
+    private func sendLiveAudio(_ chunk: Data) async {
+        var attempted = false
+        var failed = false
+        if let forwardClient {
+            attempted = true
+            do { try await forwardClient.sendAudio(chunk) } catch { failed = true }
+        }
+        if let reverseClient {
+            attempted = true
+            do { try await reverseClient.sendAudio(chunk) } catch { failed = true }
+        }
+        guard attempted else { return }
+        if failed {
+            consecutiveSendFailures += 1
+            if consecutiveSendFailures >= 5 {
+                consecutiveSendFailures = 0
+                await switchToFallback(reason: "同传发送失败（连接已断）")
+            }
+        } else {
+            consecutiveSendFailures = 0
+        }
     }
 
     private func handleAudioError(_ error: Error) async {
@@ -379,14 +444,24 @@ public final class InterpretationEngine: ObservableObject {
         }
     }
 
-    private func handleLiveEvent(_ event: LiveInterpretClient.Event, isForward: Bool) async {
+    private func handleLiveEvent(_ event: LiveInterpretClient.Event, isForward: Bool, generation: Int) async {
+        // M7: ignore events from a superseded session generation, and
+        // stop work if this task was cancelled while tearing down.
+        guard generation == sessionGeneration, !Task.isCancelled else { return }
         switch event {
         case .ttsAudio(let pcm):
             if latencyMeasurement.firstTTSAudioMs == nil, let sent = firstAudioSentAt {
                 latencyMeasurement.firstTTSAudioMs = Date().timeIntervalSince(sent) * 1000
                 latency = latencyMeasurement
             }
-            router.playTranslation(pcm: pcm)
+            // M9: in bidirectional mode, only play audio from the
+            // direction whose source language matches the sentence
+            // being spoken — the other session also receives the mic
+            // audio and would otherwise play its (wrong-direction)
+            // output over it. See shouldPlayLiveAudio.
+            if shouldPlayLiveAudio(isForward: isForward) {
+                router.playTranslation(pcm: pcm)
+            }
         case .translationPartial:
             if latencyMeasurement.firstTranslationTextMs == nil, let sent = firstAudioSentAt {
                 latencyMeasurement.firstTranslationTextMs = Date().timeIntervalSince(sent) * 1000
@@ -427,11 +502,36 @@ public final class InterpretationEngine: ObservableObject {
         publishSegments()
     }
 
-    private func handleLiveStreamEnded() async {
+    private func handleLiveStreamEnded(generation: Int) async {
+        // M7: a stream ending from an old generation must not kill
+        // the session that replaced it (manual retry, 30s auto-retry,
+        // direction lock all rebuild sessions while the old stream
+        // is still winding down).
+        guard generation == sessionGeneration, !Task.isCancelled else { return }
         // A live stream ending without an explicit failure is still a
         // broken session: fall back rather than going silent.
         guard phase == .live || phase == .connecting else { return }
         await switchToFallback(reason: "同传连接中断")
+    }
+
+    /// M9: per-sentence audio gate for bidirectional sessions. The
+    /// sentence being spoken is the direction assembler's latest
+    /// source text (settled segment, else live draft); if its
+    /// detected language does not match what this session expects,
+    /// this audio belongs to the other direction and stays silent.
+    /// Single-direction sessions always play. When there is no
+    /// source text yet to judge by, play — the subtitle gate hides
+    /// mismatched text, and blocking audio with no evidence would
+    /// mute legitimate first sentences. Heuristic until real
+    /// bidirectional sessions confirm the behaviour: 待真机验证.
+    private func shouldPlayLiveAudio(isForward: Bool) -> Bool {
+        guard direction == .both else { return true }
+        let expected: TextLanguage = isForward ? forwardExpectedLanguage() : .english
+        let assembler = isForward ? forwardAssembler : reverseAssembler
+        let source = assembler?.segments.reversed().first(where: { !$0.sourceText.isEmpty })?.sourceText
+            ?? assembler?.liveDraft.source ?? ""
+        guard !source.isEmpty else { return true }
+        return TextLanguage.detect(source) == expected
     }
 
     private func publishSegments() {
@@ -458,7 +558,14 @@ public final class InterpretationEngine: ObservableObject {
     }
 
     private func forwardExpectedLanguage() -> TextLanguage {
-        direction == .enToZh ? .english : .chinese
+        // M8: the expected source language is decided by the ACTUAL
+        // direction of the forward session, not by `direction`. When
+        // direction is .both and the user locked en→zh, the forward
+        // session really is en→zh — the old code read `direction`
+        // (.both) and expected Chinese, so every English source
+        // sentence was filtered and the screen stayed blank.
+        let actual = lockedDirection ?? direction
+        return actual == .enToZh ? .english : .chinese
     }
 
     /// Bidirectional output gate: a segment only counts when its
