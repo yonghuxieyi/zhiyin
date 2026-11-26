@@ -92,18 +92,40 @@ struct FaceToFaceView: View {
                     dualModeView
                 }
             }
-            .navigationTitle(isSingleMode ? "对话" : "面对面")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(isSingleMode ? .visible : .hidden, for: .navigationBar)
             .toolbar {
                 if isSingleMode {
+                    // Item 10 (23:49/23:50): in continuous mode the
+                    // top-left (where the view button was) shows the
+                    // consumption number only, no label; the title
+                    // stays centred no matter how wide the side items
+                    // are, so the trailing item is an invisible block
+                    // the same width as the leading one.
                     ToolbarItem(placement: .topBarLeading) {
-                        Button {
-                            showingViewPicker = true
-                        } label: {
-                            Image(systemName: "person")
+                        Group {
+                            if isContinuousMode {
+                                Text(consumptionText)
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                                    .accessibilityLabel("今日已用同传分钟数")
+                            } else {
+                                Button {
+                                    showingViewPicker = true
+                                } label: {
+                                    Image(systemName: "person")
+                                }
+                                .accessibilityLabel("视图")
+                            }
                         }
-                        .accessibilityLabel("视图")
+                        .frame(width: 64, alignment: .leading)
+                    }
+                    ToolbarItem(placement: .principal) {
+                        Text("对话")
+                            .font(.headline)
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Color.clear.frame(width: 64, height: 44)
                     }
                 }
             }
@@ -551,6 +573,8 @@ struct FaceToFaceView: View {
                     .foregroundStyle(micIconColor)
             }
         }
+        // Item 10 (22:44): the quota ring around the mic button.
+        .overlay(quotaRing(diameter: isContinuousMode ? 106 : 82))
         .onTapGesture {
             if isContinuousMode {
                 toggleContinuousPause()
@@ -569,14 +593,57 @@ struct FaceToFaceView: View {
         .accessibilityAddTraits(.isButton)
     }
 
+    /// Item 10 (22:44): the quota ring around the mic button. The
+    /// live-interpretation allowance is 20 sessions/day; the ring
+    /// shows the fraction still free. Green while plenty, orange
+    /// once the warning line is hit (16 used), grey at 0 — and at 0
+    /// the button cannot enter continuous mode at all.
+    private var quotaRemaining: Int { interpretEngine.quota.liveSessionsRemaining }
+    private var quotaExhausted: Bool { quotaRemaining <= 0 }
+    private var quotaFraction: Double {
+        Double(quotaRemaining) / Double(InterpretationQuotaStore.liveSessionsFreePerDay)
+    }
+    private var quotaColor: Color {
+        if quotaExhausted { return .gray }
+        if interpretEngine.quota.liveSessionsWarning { return .orange }
+        return .green
+    }
+    private func quotaRing(diameter: CGFloat) -> some View {
+        ZStack {
+            Circle().stroke(Color.gray.opacity(0.25), lineWidth: 4)
+            Circle()
+                .trim(from: 0, to: quotaFraction)
+                .stroke(quotaColor, lineWidth: 4)
+                .rotationEffect(.degrees(-90))
+        }
+        .frame(width: diameter, height: diameter)
+        .allowsHitTesting(false)
+    }
+
+    /// Item 10 (23:49): the consumption number at the top-left
+    /// during a continuous session — today's live minutes so far,
+    /// including the running session. There is no per-minute price
+    /// for the live service anywhere in the codebase (free trial,
+    /// no rate), so no ¥ figure can be computed honestly; minutes
+    /// are the live usage number available. One decimal, no label.
+    private var consumptionText: String {
+        let total = interpretEngine.quota.liveMinutesToday + continuousElapsed / 60.0
+        return String(format: "%.1f", total)
+    }
+
     /// Item 9 (21:51): the mic button shows whether it is in use —
     /// grey when idle, green while listening or in continuous mode.
+    /// Item 10: at 0 free sessions left the button goes a darker
+    /// grey and cannot enter continuous mode (the one-shot tap
+    /// still works — it does not use a live session).
     private var micButtonColor: Color {
-        listeningSide != nil ? .green : Color(.systemGray5)
+        if quotaExhausted { return Color(.systemGray3) }
+        return listeningSide != nil ? .green : Color(.systemGray5)
     }
 
     private var micIconColor: Color {
-        listeningSide != nil ? .white : .primary
+        if quotaExhausted { return .secondary }
+        return listeningSide != nil ? .white : .primary
     }
 
     private var singleMicLabel: String {
@@ -609,6 +676,12 @@ struct FaceToFaceView: View {
         guard !isContinuousMode, !isWorking, listeningSide == nil else { return }
         guard let config else {
             errorMessage = "语音未配置。"
+            return
+        }
+        // Item 10 (22:44): no free live sessions left today — the
+        // button is grey and long-press does nothing.
+        guard !quotaExhausted else {
+            errorMessage = "今日免费同传次数已用完。"
             return
         }
         micHaptic(.medium)
