@@ -76,6 +76,12 @@ targets:
         AppIdentifierPrefix: $(AppIdentifierPrefix)
         UILaunchScreen:
           UIColorName: ""
+        # M11: keep recording / playback alive when the phone locks or
+        # the app goes to the background — interpretation sessions are
+        # meant to run 30–60 minutes. A plist key, not an entitlement,
+        # so it survives SideStore re-signing.
+        UIBackgroundModes:
+          - audio
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationPortraitUpsideDown

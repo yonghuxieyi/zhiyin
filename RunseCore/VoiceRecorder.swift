@@ -29,7 +29,19 @@ public final class VoiceRecorder {
     public func start() throws -> AsyncStream<Data> {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetooth])
+            // M6: .allowBluetooth routes the mic through the HFP
+            // phone-call profile, which is mono — the left/right pan
+            // (-1/+1) of the earphone router would be lost, and
+            // .measurement has no echo cancellation, so played
+            // translation audio would be picked up and re-translated.
+            // A2DP keeps stereo playback; the input is forced to the
+            // iPhone's own microphone.
+            try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetoothA2DP])
+            if let builtInMic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+                // Best effort: the built-in mic is the default input
+                // anyway, so a failure here must not block recording.
+                try? session.setPreferredInput(builtInMic)
+            }
             try session.setActive(true)
         } catch {
             throw RecorderError.cannotStart(error)
@@ -66,7 +78,19 @@ public final class VoiceRecorder {
         guard let converter,
               let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * targetFormat.sampleRate / buffer.format.sampleRate) + 1024) else { return }
         var error: NSError?
+        // M5: the converter's input callback may be invoked more than
+        // once per convert call. Returning the same buffer every time
+        // feeds the same audio twice (duplicated words / odd speed in
+        // recognition). The first call supplies the buffer; later calls
+        // report .noDataNow. EarphoneRouter.decodeMP3ToPCM24k already
+        // uses this pattern.
+        var supplied = false
         let status = converter.convert(to: converted, error: &error) { _, outStatus in
+            if supplied {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            supplied = true
             outStatus.pointee = .haveData
             return buffer
         }

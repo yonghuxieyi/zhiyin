@@ -1,6 +1,7 @@
 import RunseCore
 import SwiftData
 import SwiftUI
+import UIKit
 
 /// Simultaneous interpretation: its own page. Live subtitles in both
 /// languages side by side, pause / review / save, quota and latency
@@ -374,6 +375,10 @@ struct InterpretationView: View {
 
     private func startSession() async {
         guard let config else { return }
+        // M11: keep the screen awake for the whole session — a
+        // 30–60 minute interpretation must not be cut off by the
+        // idle timer. Restored in stopSession.
+        UIApplication.shared.isIdleTimerDisabled = true
         let glossary = GlossaryAST.glossaryList(from: glossaryEntries)
         let translator: InterpretationEngine.Translator = { text, source, target, note in
             guard let profile = profiles.first(where: \.isDefault) ?? profiles.first else {
@@ -454,6 +459,7 @@ struct InterpretationView: View {
     }
 
     private func stopSession() async {
+        UIApplication.shared.isIdleTimerDisabled = false
         let record = await engine.stop()
         streamingPlayer.stop()
         if let client = streamingClient {

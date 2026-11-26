@@ -12,9 +12,10 @@ import Foundation
 /// decodes the async TTS MP3 to 24kHz mono PCM first.
 ///
 /// Assumes the audio session is already configured for
-/// play-and-record with Bluetooth (VoiceRecorder owns that); this
-/// class only manages the engine. Device-only: no unit tests cover
-/// the engine itself, only the format constants.
+/// play-and-record with Bluetooth A2DP and the built-in microphone
+/// (VoiceRecorder owns that; M6); this class only manages the engine.
+/// Device-only: no unit tests cover the engine itself, only the
+/// format constants.
 public final class EarphoneRouter {
     /// Original voice: left ear.
     public static let originalPan: Float = -1

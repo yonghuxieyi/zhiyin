@@ -2,6 +2,7 @@ import PDFKit
 import RunseCore
 import SwiftData
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// PDF document translation (清单 11): import a PDF, extract text per
@@ -166,11 +167,17 @@ struct PDFView: View {
     private func runTranslation() async {
         guard let document else { return }
         isWorking = true
+        // M11: a long document takes a while — keep the screen awake
+        // until translation finishes (or fails / is cancelled).
+        UIApplication.shared.isIdleTimerDisabled = true
         errorMessage = nil
         dualCheckNote = nil
         exportURL = nil
         translated = []
-        defer { isWorking = false }
+        defer {
+            isWorking = false
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
         do {
             guard let profile = profiles.first(where: \.isDefault) ?? profiles.first else {
                 throw LLMProviderError.invalidURL
