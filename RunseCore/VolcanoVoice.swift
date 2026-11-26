@@ -591,6 +591,8 @@ public actor VolcanoTTSClient {
 /// stored property.
 public final class AudioPlayer {
     private var player: AVAudioPlayer?
+    /// Item 6: AVAudioPlayer has no isPaused flag, so track it here.
+    private var paused = false
 
     public init() {}
 
@@ -598,12 +600,33 @@ public final class AudioPlayer {
         player = try AVAudioPlayer(data: data)
         player?.prepareToPlay()
         player?.play()
+        paused = false
     }
 
     @MainActor public var isPlaying: Bool { player?.isPlaying == true }
 
+    /// Item 6: pause keeps the player (and its position) alive so the
+    /// read-aloud can resume; stop discards it.
+    @MainActor public func pause() {
+        player?.pause()
+        paused = true
+    }
+
+    @MainActor public func resume() {
+        player?.play()
+        paused = false
+    }
+
+    @MainActor public var isPaused: Bool { paused && player != nil }
+
+    /// Item 6: progress for the read-aloud progress bar.
+    @MainActor public var currentTime: TimeInterval { player?.currentTime ?? 0 }
+
+    @MainActor public var duration: TimeInterval { player?.duration ?? 0 }
+
     @MainActor public func stop() {
         player?.stop()
         player = nil
+        paused = false
     }
 }

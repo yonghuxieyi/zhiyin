@@ -189,13 +189,10 @@ struct TranslateView: View {
                     Task { await stopDictation() }
                 }
                 if isSpeaking {
-                    speakTask?.cancel()
-                    speakTask = nil
-                    playbackPollTask?.cancel()
-                    playbackPollTask = nil
-                    isSpeaking = false
-                    player.stop()
+                    stopPlayback()
                 }
+                copyResetTask?.cancel()
+                copyResetTask = nil
                 // Item 5: a delayed sheet open / auto-translate must not
                 // fire after leaving the page.
                 pendingSheetTask?.cancel()
@@ -346,12 +343,18 @@ struct TranslateView: View {
                 Button {
                     toggleSpeak()
                 } label: {
-                    Image(systemName: isSpeaking ? "stop.circle.fill" : "speaker.wave.2.fill")
+                    Image(systemName: speakButtonIcon)
                         .font(.title3)
                 }
                 .buttonStyle(.plain)
                 .disabled(segments.allSatisfy { $0.translation.isEmpty })
-                .accessibilityLabel(isSpeaking ? "停止朗读" : "朗读译文")
+                .accessibilityLabel(speakButtonLabel)
+            }
+
+            // Item 6: Apple style — a progress bar under the header while
+            // the translation is being read aloud.
+            if isSpeaking {
+                ProgressView(value: playbackProgress)
             }
 
             ForEach(segments) { row in
@@ -410,6 +413,14 @@ struct TranslateView: View {
                 Button {
                     UIPasteboard.general.string = segments.map(\.translation).joined(separator: "\n")
                     didCopy = true
+                    // Item 6: Apple shows the checkmark briefly, then it
+                    // reverts to the copy icon.
+                    copyResetTask?.cancel()
+                    copyResetTask = Task {
+                        try? await Task.sleep(for: .seconds(2))
+                        guard !Task.isCancelled else { return }
+                        didCopy = false
+                    }
                 } label: {
                     Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
                 }
@@ -554,6 +565,10 @@ struct TranslateView: View {
     private func nextTranslation() {
         autoTranslateTask?.cancel()
         autoTranslateTask = nil
+        // Item 6: a new passage stops the read-aloud of the old one.
+        if isSpeaking { stopPlayback() }
+        copyResetTask?.cancel()
+        copyResetTask = nil
         inputText = ""
         segments = []
         errorMessage = nil
@@ -686,19 +701,51 @@ struct TranslateView: View {
     @State private var isSpeaking = false
     @State private var speakTask: Task<Void, Never>?
     @State private var playbackPollTask: Task<Void, Never>?
+    /// Item 6: Apple-style read-aloud — pause button + progress bar.
+    @State private var isPaused = false
+    @State private var playbackProgress: Double = 0
+    /// Item 6: the copy checkmark is transient, like Apple's.
+    @State private var copyResetTask: Task<Void, Never>?
 
+    /// Item 6: Apple style — the speaker button pauses / resumes, it
+    /// does not stop. Playback ends on its own, or via 下一个 / leaving.
     @MainActor
     private func toggleSpeak() {
         if isSpeaking {
-            speakTask?.cancel()
-            speakTask = nil
-            playbackPollTask?.cancel()
-            playbackPollTask = nil
-            isSpeaking = false
-            player.stop()
+            if isPaused {
+                player.resume()
+                isPaused = false
+            } else {
+                player.pause()
+                isPaused = true
+            }
         } else {
             speakTask = Task { await speakTranslation() }
         }
+    }
+
+    /// Item 6: stop read-aloud entirely (下一个 / leaving the page).
+    @MainActor
+    private func stopPlayback() {
+        speakTask?.cancel()
+        speakTask = nil
+        playbackPollTask?.cancel()
+        playbackPollTask = nil
+        isSpeaking = false
+        isPaused = false
+        playbackProgress = 0
+        player.stop()
+    }
+
+    /// Item 6: Apple style — speaker, then pause while playing, play to resume.
+    private var speakButtonIcon: String {
+        if !isSpeaking { return "speaker.wave.2.fill" }
+        return isPaused ? "play.circle.fill" : "pause.circle.fill"
+    }
+
+    private var speakButtonLabel: String {
+        if !isSpeaking { return "朗读译文" }
+        return isPaused ? "继续朗读" : "暂停朗读"
     }
 
     @MainActor
@@ -724,6 +771,8 @@ struct TranslateView: View {
                 return
             } catch is CancellationError {
                 isSpeaking = false
+                isPaused = false
+                playbackProgress = 0
                 speakTask = nil
                 return
             } catch {
@@ -736,26 +785,34 @@ struct TranslateView: View {
             try playAndTrack(audio)
         } catch is CancellationError {
             isSpeaking = false
+            isPaused = false
+            playbackProgress = 0
             speakTask = nil
         } catch {
             isSpeaking = false
+            isPaused = false
+            playbackProgress = 0
             speakTask = nil
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
 
     /// Play one-shot audio and keep the speaker button in the playing
-    /// state until the player actually stops.
+    /// state until the player actually stops. Pausing keeps the loop
+    /// alive (progress frozen) instead of ending playback.
     @MainActor
     private func playAndTrack(_ audio: Data) throws {
         try player.play(data: audio)
         playbackPollTask?.cancel()
         playbackPollTask = Task {
-            while !Task.isCancelled && player.isPlaying {
+            while !Task.isCancelled && (player.isPlaying || player.isPaused) {
+                playbackProgress = player.duration > 0 ? player.currentTime / player.duration : 0
                 try? await Task.sleep(for: .milliseconds(200))
             }
             if !Task.isCancelled {
+                playbackProgress = 0
                 isSpeaking = false
+                isPaused = false
                 speakTask = nil
             }
         }
