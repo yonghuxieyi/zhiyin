@@ -56,8 +56,11 @@ struct ModelPickerSheet: View {
                 voiceConfigured = config != nil
                 qwenConfigured = await DashScopeStore.hasKey()
                 // S13: one DeepSeek key covers both DeepSeek options.
-                deepSeekConfigured = await ProviderKeyStore.hasKey(profileID: RunseConstants.defaultProfileID)
-                    || await ProviderKeyStore.hasKey(profileID: RunseConstants.deepSeekProProfileID)
+                // await may not sit on the right of ||, so each side
+                // is awaited into a local first.
+                let flashKey = await ProviderKeyStore.hasKey(profileID: RunseConstants.defaultProfileID)
+                let proKey = await ProviderKeyStore.hasKey(profileID: RunseConstants.deepSeekProProfileID)
+                deepSeekConfigured = flashKey || proKey
             }
         }
     }

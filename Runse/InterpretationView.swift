@@ -250,51 +250,87 @@ struct InterpretationView: View {
 
     private var quotaSection: some View {
         Section("额度") {
-            let quota = engine.quota
-            HStack {
-                Text("今日同传")
-                Spacer()
-                Text("\(quota.liveSessionsToday)/\(InterpretationQuotaStore.liveSessionsFreePerDay) 次")
-                    .foregroundStyle(quota.liveSessionsWarning ? .orange : .primary)
-            }
-            HStack {
-                Text("今日同传用时")
-                Spacer()
-                Text(String(format: "%.1f 分钟", quota.liveMinutesToday))
-                    .foregroundStyle(.secondary)
-            }
-            HStack {
-                Text("识别试用剩")
-                Spacer()
-                Text(String(format: "%.1f 小时", quota.asrMinutesRemaining / 60.0))
-                    .foregroundStyle(quota.asrWarning ? .orange : .secondary)
-            }
-            HStack {
-                Text("合成试用剩")
-                Spacer()
-                Text("\(quota.ttsCharsRemaining) 字")
-                    .foregroundStyle(quota.ttsWarning ? .orange : .secondary)
-            }
-            HStack {
-                Text("账户余额")
-                Spacer()
-                // S12: there is no console API to query the balance,
-                // so a missing value must read as unknown — the old
-                // hardcoded "¥2.36（2026-11-25 记录）" looked like a
-                // live figure and only got staler. The value can be
-                // updated by hand in Settings.
-                if let balance = quota.balanceYuan {
-                    Text("¥" + String(format: "%.2f", balance) + (quota.balanceAsOf.map { "（截至 " + Self.balanceDateString($0) + "）" } ?? ""))
-                        .foregroundStyle(balance < 5 ? .orange : .secondary)
-                } else {
-                    Text("未知（2026-11-25 最后一次记录 ¥2.36）")
-                        .foregroundStyle(.secondary)
-                }
-            }
+            liveSessionsRow
+            liveMinutesRow
+            asrRemainingRow
+            ttsRemainingRow
+            balanceRow
             Text("识别 20 小时、合成 20000 字试用到 2027-05-25；超量按量后付费，余额不足会停。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    /// S12: each quota row is its own view so the compiler type-checks
+    /// them one at a time — the whole Section in one expression was
+    /// too much for it ("unable to type-check in reasonable time").
+    private var liveSessionsRow: some View {
+        let quota = engine.quota
+        return HStack {
+            Text("今日同传")
+            Spacer()
+            Text("\(quota.liveSessionsToday)/\(InterpretationQuotaStore.liveSessionsFreePerDay) 次")
+                .foregroundStyle(quota.liveSessionsWarning ? .orange : .primary)
+        }
+    }
+
+    private var liveMinutesRow: some View {
+        let quota = engine.quota
+        return HStack {
+            Text("今日同传用时")
+            Spacer()
+            Text(String(format: "%.1f 分钟", quota.liveMinutesToday))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var asrRemainingRow: some View {
+        let quota = engine.quota
+        return HStack {
+            Text("识别试用剩")
+            Spacer()
+            Text(String(format: "%.1f 小时", quota.asrMinutesRemaining / 60.0))
+                .foregroundStyle(quota.asrWarning ? .orange : .secondary)
+        }
+    }
+
+    private var ttsRemainingRow: some View {
+        let quota = engine.quota
+        return HStack {
+            Text("合成试用剩")
+            Spacer()
+            Text("\(quota.ttsCharsRemaining) 字")
+                .foregroundStyle(quota.ttsWarning ? .orange : .secondary)
+        }
+    }
+
+    private var balanceRow: some View {
+        let quota = engine.quota
+        return HStack {
+            Text("账户余额")
+            Spacer()
+            // S12: there is no console API to query the balance,
+            // so a missing value must read as unknown — the old
+            // hardcoded "¥2.36（2026-11-25 记录）" looked like a
+            // live figure and only got staler. The value can be
+            // updated by hand in Settings.
+            if let balance = quota.balanceYuan {
+                Text(balanceDisplayText(balance: balance, asOf: quota.balanceAsOf))
+                    .foregroundStyle(balance < 5 ? .orange : .secondary)
+            } else {
+                Text("未知（2026-11-25 最后一次记录 ¥2.36）")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// S12: balance string built outside the view builder — the nested
+    /// map + concatenation inside the Section was part of what the
+    /// type-checker choked on.
+    private func balanceDisplayText(balance: Double, asOf: Date?) -> String {
+        var text = "¥" + String(format: "%.2f", balance)
+        if let asOf { text += "（截至 " + Self.balanceDateString(asOf) + "）" }
+        return text
     }
 
     // MARK: - Latency

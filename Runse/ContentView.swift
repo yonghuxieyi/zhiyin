@@ -441,8 +441,11 @@ struct SettingsView: View {
         Task {
             // S13: keep the DeepSeek status in sync when the picker
             // closes (a key may have just been saved for it).
-            deepSeekConfigured = await ProviderKeyStore.hasKey(profileID: RunseConstants.defaultProfileID)
-                || await ProviderKeyStore.hasKey(profileID: RunseConstants.deepSeekProProfileID)
+            // await may not sit on the right of ||, so each side
+            // is awaited into a local first.
+            let flashKey = await ProviderKeyStore.hasKey(profileID: RunseConstants.defaultProfileID)
+            let proKey = await ProviderKeyStore.hasKey(profileID: RunseConstants.deepSeekProProfileID)
+            deepSeekConfigured = flashKey || proKey
             if let profileID = apiKeyProfileID {
                 do {
                     providerKeyConfigured = try await ProviderKeyStore.loadKeyThrowing(profileID: profileID) != nil
@@ -768,8 +771,11 @@ struct SettingsView: View {
                     keychainReadError = "钥匙串读取失败：\(error.localizedDescription)"
                 }
                 // S13: one DeepSeek key covers both DeepSeek options.
-                deepSeekConfigured = await ProviderKeyStore.hasKey(profileID: RunseConstants.defaultProfileID)
-                    || await ProviderKeyStore.hasKey(profileID: RunseConstants.deepSeekProProfileID)
+                // await may not sit on the right of ||, so each side
+                // is awaited into a local first.
+                let flashKey = await ProviderKeyStore.hasKey(profileID: RunseConstants.defaultProfileID)
+                let proKey = await ProviderKeyStore.hasKey(profileID: RunseConstants.deepSeekProProfileID)
+                deepSeekConfigured = flashKey || proKey
                 dashScopeWorkspaceID = await DashScopeStore.loadWorkspaceID() ?? ""
                 refreshProviderKeyStatus()
             }
