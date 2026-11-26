@@ -413,20 +413,19 @@ public final class InterpretationEngine: ObservableObject {
         // each = 20 s before going live). They overlap now — each
         // child awaits its own client's start() and the network
         // waits interleave while the other child is suspended.
-        // Result carries the error message as a String because
-        // `Error` is not Sendable and cannot cross the task group.
-        let outcomes = await withTaskGroup(of: (Int, Result<AsyncStream<LiveInterpretClient.Event>, String>).self) { group in
+        // `Result` carries the failure detail in `LiveStartFailure`.
+        let outcomes = await withTaskGroup(of: (Int, Result<AsyncStream<LiveInterpretClient.Event>, LiveStartFailure>).self) { group in
             for (index, client) in clients.enumerated() {
                 group.addTask {
                     do {
                         let stream = try await client.start()
                         return (index, .success(stream))
                     } catch {
-                        return (index, .failure((error as? LocalizedError)?.errorDescription ?? error.localizedDescription))
+                        return (index, .failure(LiveStartFailure(message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)))
                     }
                 }
             }
-            var collected: [(Int, Result<AsyncStream<LiveInterpretClient.Event>, String>)] = []
+            var collected: [(Int, Result<AsyncStream<LiveInterpretClient.Event>, LiveStartFailure>)] = []
             for await outcome in group { collected.append(outcome) }
             return collected
         }
@@ -457,7 +456,7 @@ public final class InterpretationEngine: ObservableObject {
                 startedAny = true
                 startedCount += 1
             case .failure(let detail):
-                lastError = detail
+                lastError = detail.message
             }
         }
 
@@ -868,6 +867,14 @@ public final class InterpretationEngine: ObservableObject {
             await translateFallbackSentence(sentence)
         }
     }
+}
+
+/// S21: the task-group outcome carries the failure message in a
+/// `Result`, whose Failure must conform to `Error` — `String` does
+/// not, and `Error` itself is not Sendable, so this one-message
+/// error type stands in for it.
+private struct LiveStartFailure: Error, Sendable {
+    let message: String
 }
 
 /// Plain record of a finished session, for the view to persist into
