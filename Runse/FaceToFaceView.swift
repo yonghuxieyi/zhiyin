@@ -80,6 +80,48 @@ struct FaceToFaceView: View {
     @State private var isContinuousPaused = false
     @State private var continuousElapsed: TimeInterval = 0
     @State private var continuousTickerTask: Task<Void, Never>?
+    /// Item 11 (UI redesign, 22:51): the language card (top-right
+    /// "…" on the conversation page) — the same three toggles as the
+    /// translate page's card (item 5), but no settings row. The
+    /// toggles are the conversation page's own SettingsStore keys
+    /// (conversationPlayTranslation / conversationAutoTranslate /
+    /// conversationDetectLanguage), NOT the translate page's shared
+    /// ones — each card controls its own page.
+    ///
+    /// What each toggle does in conversation:
+    /// - 播放翻译: translations are read aloud automatically.
+    ///   One-shot: the turn's translation is spoken at the end of
+    ///   translateAndSpeak (off → text only, 重播 still plays it).
+    ///   Continuous: the engine's speaker/streaming closures check
+    ///   the setting live per segment (off → subtitles only).
+    /// - 自动翻译: input is translated without being asked. One-shot:
+    ///   on stop, the transcript is translated at once (off → the
+    ///   final text waits as a pending row with a 翻译 button).
+    ///   Continuous: the engine always translates live — the mode
+    ///   IS translation, so this toggle has no off state there.
+    /// - 检测语言: the input language is auto-detected. One-shot:
+    ///   the target comes from TextLanguage.detect (off → fixed
+    ///   中文→英语). Continuous: direction is single .zhToEn /
+    ///   dual .both when on, always .zhToEn when off.
+    ///
+    /// Defaults (decided in review): the conversation page's three
+    /// default ON — speaking is for translating, and a translation
+    /// is for hearing (the page's established flow: speak →
+    /// translate → speak). The translate page's three stay OFF by
+    /// default (item 5 — a typed passage must not auto-translate on
+    /// every pause or auto-read aloud unprompted). Each page keeps
+    /// its own defaults; flipping a switch in either card only
+    /// affects that page.
+    @State private var playTranslationEnabled = SettingsStore().conversationPlayTranslation
+    @State private var autoTranslateEnabled = SettingsStore().conversationAutoTranslate
+    @State private var detectLanguageEnabled = SettingsStore().conversationDetectLanguage
+    @State private var showingLanguageCard = false
+    /// Item 11: a finished transcript waiting for a manual 翻译 tap
+    /// (自动翻译 off). Cleared by a new listen, by entering
+    /// continuous mode, or by switching single / face-to-face.
+    @State private var pendingTranscript: String?
+    @State private var pendingSide: FaceSide?
+    private let settings = SettingsStore()
 
     private var latestTurn: FaceTurn? { turns.last }
 
@@ -124,8 +166,20 @@ struct FaceToFaceView: View {
                         Text("对话")
                             .font(.headline)
                     }
+                    // Item 11 (22:51): the language card opens from
+                    // the top-right "…". The button overlays the
+                    // invisible spacer, so the overlay adds no width
+                    // and the title stays centred (23:50).
                     ToolbarItem(placement: .topBarTrailing) {
                         Color.clear.frame(width: 64, height: 44)
+                            .overlay(alignment: .trailing) {
+                                Button {
+                                    showingLanguageCard = true
+                                } label: {
+                                    Image(systemName: "ellipsis.circle")
+                                }
+                                .accessibilityLabel("语言选项")
+                            }
                     }
                 }
             }
@@ -133,13 +187,27 @@ struct FaceToFaceView: View {
         .sheet(isPresented: $showingViewPicker) {
             ConversationViewPicker(isSingleMode: $isSingleMode)
         }
+        .sheet(isPresented: $showingLanguageCard) {
+            ConversationLanguageCard(
+                playTranslationEnabled: $playTranslationEnabled,
+                autoTranslateEnabled: $autoTranslateEnabled,
+                detectLanguageEnabled: $detectLanguageEnabled
+            )
+        }
         // Item 8: switching single / face-to-face ends a continuous
         // session — its controls live on the mic of the current mode.
         .onChange(of: isSingleMode) { _, _ in
             if isContinuousMode {
                 Task { await stopContinuousMode() }
             }
+            // Item 11: a pending transcript belongs to the other
+            // mode's layout; switching views discards it.
+            pendingTranscript = nil
+            pendingSide = nil
         }
+        .onChange(of: playTranslationEnabled) { _, value in settings.conversationPlayTranslation = value }
+        .onChange(of: autoTranslateEnabled) { _, value in settings.conversationAutoTranslate = value }
+        .onChange(of: detectLanguageEnabled) { _, value in settings.conversationDetectLanguage = value }
         .task {
             config = await VolcanoVoiceStore.load()
         }
@@ -250,6 +318,22 @@ struct FaceToFaceView: View {
                 if isContinuousMode {
                     continuousWaveform
                 }
+                // Item 11: 自动翻译 off — the finished transcript
+                // waits here with a manual 翻译 button.
+                if let pendingTranscript, !isContinuousMode {
+                    HStack(spacing: 8) {
+                        Text(pendingTranscript)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                        Spacer()
+                        Button("翻译") {
+                            Task { await translatePending() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isWorking)
+                    }
+                }
                 HStack {
                     Spacer()
                     Button {
@@ -321,6 +405,29 @@ struct FaceToFaceView: View {
         }
     }
 
+    /// Item 11: the pending-transcript row (自动翻译 off) for one
+    /// side of the face-to-face layout — the finished text waits
+    /// with a manual 翻译 button. (The top half is rotated 180°,
+    /// so this row reads upright for the person across, like the
+    /// rest of that half.)
+    @ViewBuilder
+    private func pendingRow(side: FaceSide) -> some View {
+        if pendingSide == side, let pendingTranscript {
+            HStack(spacing: 8) {
+                Text(pendingTranscript)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Spacer()
+                Button("翻译") {
+                    Task { await translatePending() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isWorking)
+            }
+        }
+    }
+
     /// Item 7: face-to-face mode — the original split layout
     /// (top half rotated 180° for the person across).
     private var dualModeView: some View {
@@ -350,6 +457,7 @@ struct FaceToFaceView: View {
                             .multilineTextAlignment(.center)
                     }
                     dualMicButton(side: .them)
+                    pendingRow(side: .them)
                 }
                 .padding()
             }
@@ -404,6 +512,9 @@ struct FaceToFaceView: View {
                         .buttonStyle(.bordered)
                         .disabled(latestTurn == nil || isWorking)
                     }
+                    // Item 11: 自动翻译 off — the finished transcript
+                    // for my side waits here with a 翻译 button.
+                    pendingRow(side: .me)
                     // Item 9 (21:51): sound-wave animation while the
                     // continuous session is live.
                     if isContinuousMode {
@@ -686,6 +797,10 @@ struct FaceToFaceView: View {
         }
         micHaptic(.medium)
         errorMessage = nil
+        // Item 11: entering continuous mode supersedes a pending
+        // transcript (the engine translates live from here).
+        pendingTranscript = nil
+        pendingSide = nil
         isContinuousMode = true
         isContinuousPaused = false
         continuousElapsed = 0
@@ -723,6 +838,12 @@ struct FaceToFaceView: View {
             return results.first?.translation ?? ""
         }
         let speaker: InterpretationEngine.Speaker = { text in
+            // Item 11: 播放翻译 off — subtitles only, no audio.
+            // The setting is read live per segment, so toggling it
+            // mid-session takes effect at once. Empty Data decodes
+            // to nothing (EarphoneRouter guards), so the session
+            // flows on.
+            guard SettingsStore().conversationPlayTranslation else { return Data() }
             if await MyVoice.isEnabled(),
                let apiKey = await DashScopeStore.loadKey(),
                let voiceID = await QwenVoiceStore.loadVoiceID() {
@@ -736,14 +857,19 @@ struct FaceToFaceView: View {
         // Streaming TTS for the sequential line (清单 12), same as
         // the interpretation page. Skipped when "my voice" is on:
         // the cloned voice has no streaming path here.
+        // Item 11: also skipped when 播放翻译 is off at session
+        // start — no point holding a streaming connection for
+        // audio that will not play.
         var streamingSpeaker: InterpretationEngine.StreamingSpeaker?
-        if await MyVoice.isEnabled() == false {
+        if SettingsStore().conversationPlayTranslation, await MyVoice.isEnabled() == false {
             let streamingClient = VolcanoStreamingTTSClient(config: config)
             do {
                 try await streamingClient.connect()
                 try streamingPlayer.start()
                 self.continuousStreamingClient = streamingClient
                 streamingSpeaker = { [streamingPlayer] text in
+                    // Item 11: turned off mid-session — stay silent.
+                    guard SettingsStore().conversationPlayTranslation else { return }
                     let settings = VoiceSettings()
                     try await streamingClient.synthesize(text: text, speaker: settings.speakerID, speechRate: settings.speechRate) { pcm in
                         streamingPlayer.enqueue(pcm)
@@ -754,7 +880,9 @@ struct FaceToFaceView: View {
             }
         }
         await interpretEngine.start(
-            direction: isSingleMode ? .zhToEn : .both,
+            // Item 11: 检测语言 off — always one-way 中文→英语,
+            // even face-to-face (no auto-detected direction).
+            direction: detectLanguageEnabled ? (isSingleMode ? .zhToEn : .both) : .zhToEn,
             config: config,
             glossary: glossary,
             translator: translator,
@@ -866,6 +994,9 @@ struct FaceToFaceView: View {
         }
         errorMessage = nil
         liveTranscript = ""
+        // Item 11: a new listen supersedes a pending transcript.
+        pendingTranscript = nil
+        pendingSide = nil
         listeningSide = side
         do {
             // N7: check the mic before opening the ASR session — a
@@ -930,10 +1061,36 @@ struct FaceToFaceView: View {
             await client.cancel()
             liveTranscript = ""
             guard let side, !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            try await translateAndSpeak(finalText, side: side)
+            // Item 11: 自动翻译 off — the transcript waits for a
+            // manual 翻译 tap instead of translating at once.
+            if autoTranslateEnabled {
+                try await translateAndSpeak(finalText, side: side)
+            } else {
+                pendingTranscript = finalText
+                pendingSide = side
+            }
         } catch is CancellationError {
             // S24: cancelled via 取消 — the finished turn stays in
             // the list, no error message.
+        } catch {
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// Item 11: translate a pending transcript (自动翻译 off) when
+    /// the user taps 翻译. Clears the pending row only on success,
+    /// so a failed translation can be retried.
+    @MainActor
+    private func translatePending() async {
+        guard let text = pendingTranscript, let side = pendingSide, !isWorking else { return }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            try await translateAndSpeak(text, side: side)
+            pendingTranscript = nil
+            pendingSide = nil
+        } catch is CancellationError {
+            // S24: cancelled via 取消 — the turn stays pending.
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -945,7 +1102,9 @@ struct FaceToFaceView: View {
         let profile = request.profile
         let apiKey = request.apiKey
         let template = request.template
-        let target = TextLanguage.detect(text).translationTarget
+        // Item 11: 检测语言 off — fixed 中文→英语 instead of
+        // detecting the input language per turn.
+        let target = detectLanguageEnabled ? TextLanguage.detect(text).translationTarget : "English"
         let parts = TextSegmenter.segments(for: text, maxChars: TextSegmenter.maxChars(for: profile))
         let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
         // S1: partial outcome — a segment that fails mid-run keeps the
@@ -990,7 +1149,11 @@ struct FaceToFaceView: View {
             ))
         }
         try? modelContext.save()
-        await speak(translation)
+        // Item 11: 播放翻译 off — the turn shows as text only;
+        // 重播 still plays it on demand.
+        if playTranslationEnabled {
+            await speak(translation)
+        }
     }
 
     @MainActor
@@ -1131,6 +1294,37 @@ private struct ConversationViewPicker: View {
                 }
             }
             .navigationTitle("视图")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+/// Item 11 (UI redesign, 22:51): the language card for the
+/// conversation page — the same three toggles as the translate
+/// page's card (item 5), but no settings row. The toggles are the
+/// conversation page's own keys (conversation*), NOT the translate
+/// page's shared ones — each card controls its own page.
+private struct ConversationLanguageCard: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var playTranslationEnabled: Bool
+    @Binding var autoTranslateEnabled: Bool
+    @Binding var detectLanguageEnabled: Bool
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("语言") {
+                    Toggle("播放翻译", isOn: $playTranslationEnabled)
+                    Toggle("自动翻译", isOn: $autoTranslateEnabled)
+                    Toggle("检测语言", isOn: $detectLanguageEnabled)
+                }
+            }
+            .navigationTitle("语言选项")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

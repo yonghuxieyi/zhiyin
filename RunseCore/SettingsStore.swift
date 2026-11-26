@@ -71,4 +71,36 @@ public final class SettingsStore {
         }
         set { defaults.set(newValue, forKey: "detectLanguage") }
     }
+
+    /// Item 11 (UI redesign): the conversation page's own language
+    /// toggles — same three switches as the translate page's card,
+    /// but a separate set of keys. The conversation defaults are ON:
+    /// speaking is for translating, and a translation is for hearing
+    /// (the page's established flow: speak → translate → speak).
+    /// The translate page's three stay OFF by default (item 5 — a
+    /// typed passage must not auto-translate on every pause or
+    /// auto-read aloud unprompted). Each card controls its own page.
+    public var conversationPlayTranslation: Bool {
+        get {
+            guard defaults.object(forKey: "conversationPlayTranslation") != nil else { return true }
+            return defaults.bool(forKey: "conversationPlayTranslation")
+        }
+        set { defaults.set(newValue, forKey: "conversationPlayTranslation") }
+    }
+
+    public var conversationAutoTranslate: Bool {
+        get {
+            guard defaults.object(forKey: "conversationAutoTranslate") != nil else { return true }
+            return defaults.bool(forKey: "conversationAutoTranslate")
+        }
+        set { defaults.set(newValue, forKey: "conversationAutoTranslate") }
+    }
+
+    public var conversationDetectLanguage: Bool {
+        get {
+            guard defaults.object(forKey: "conversationDetectLanguage") != nil else { return true }
+            return defaults.bool(forKey: "conversationDetectLanguage")
+        }
+        set { defaults.set(newValue, forKey: "conversationDetectLanguage") }
+    }
 }
