@@ -88,7 +88,7 @@ struct ContentView: View {
             }
         }
         .padding(6)
-        .background(.ultraThinMaterial, in: Capsule())
+        .liquidGlass(in: Capsule())
         .overlay {
             Capsule().stroke(Color.secondary.opacity(0.15))
         }

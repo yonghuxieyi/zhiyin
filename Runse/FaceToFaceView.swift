@@ -536,7 +536,7 @@ struct FaceToFaceView: View {
                     Image(systemName: "person.2")
                         .font(.title3)
                         .frame(width: 44, height: 44)
-                        .background(.ultraThinMaterial, in: Circle())
+                        .liquidGlass(in: Circle())
                 }
                 .accessibilityLabel("视图")
                 Spacer()
@@ -546,7 +546,7 @@ struct FaceToFaceView: View {
                     Image(systemName: "xmark")
                         .font(.title3)
                         .frame(width: 44, height: 44)
-                        .background(.ultraThinMaterial, in: Circle())
+                        .liquidGlass(in: Circle())
                 }
                 .accessibilityLabel("返回单人模式")
             }

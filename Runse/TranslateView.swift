@@ -266,7 +266,7 @@ struct TranslateView: View {
             .accessibilityLabel("互换语种")
         }
         .padding(.horizontal)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+        .liquidGlass(in: RoundedRectangle(cornerRadius: 16))
     }
 
     /// Item 2: input card — source language label, paste button,
@@ -328,7 +328,7 @@ struct TranslateView: View {
             }
         }
         .padding()
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+        .liquidGlass(in: RoundedRectangle(cornerRadius: 16))
     }
 
     /// Item 2: result card — target language label, read-aloud button,
@@ -434,7 +434,7 @@ struct TranslateView: View {
             .buttonStyle(.plain)
         }
         .padding()
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+        .liquidGlass(in: RoundedRectangle(cornerRadius: 16))
     }
 
     /// Tone stays on the translate page as a compact row — the settings
@@ -473,7 +473,7 @@ struct TranslateView: View {
             }
         }
         .padding()
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+        .liquidGlass(in: RoundedRectangle(cornerRadius: 16))
     }
 
     /// Item 3 (UI redesign): document entry at the top center of the

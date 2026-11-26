@@ -85,7 +85,7 @@ struct LiveCameraView: View {
                 }
                 .padding()
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                .liquidGlass(in: RoundedRectangle(cornerRadius: 16))
                 shutterRow
             }
             .padding(.horizontal)
@@ -153,7 +153,7 @@ struct LiveCameraView: View {
         .foregroundStyle(.primary)
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: Capsule())
+        .liquidGlass(in: Capsule())
     }
 
     /// Item 12: photo picker left, big shutter middle, torch right —
