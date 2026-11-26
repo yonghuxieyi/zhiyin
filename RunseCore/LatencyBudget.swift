@@ -105,6 +105,47 @@ public enum GlossaryAST {
     /// whose fixed translation does NOT appear in the translated
     /// text. The caller re-translates or warns on the misses.
     public static func missingTerms(in translation: String, glossary: [(source: String, target: String)]) -> [(source: String, target: String)] {
-        glossary.filter { !translation.contains($0.target) }
+        glossary.filter { !containsTerm(translation, $0.target) }
+    }
+
+    /// N3: keep only the terms whose source actually appears in this
+    /// sentence, using the same matching rule as
+    /// `GlossaryPrompt.entries(for:from:)`. Without this, the caller
+    /// passes the whole table and almost every sentence "misses"
+    /// most of it, triggering a wasted re-translation each time.
+    public static func termsAppearing(in sentence: String, from glossary: [(source: String, target: String)]) -> [(source: String, target: String)] {
+        glossary.filter { entry in
+            guard !entry.source.isEmpty else { return false }
+            if entry.source.contains(where: { $0.isLetter && !$0.isASCII }) {
+                return sentence.contains(entry.source)
+            }
+            return sentence.lowercased().contains(entry.source.lowercased())
+        }
+    }
+
+    /// N3: word-boundary, case-insensitive match for Latin terms, so
+    /// "bank" no longer matches "banking" and "Bank" matches "bank".
+    /// Non-ASCII (CJK) terms have no word boundaries: plain contains.
+    private static func containsTerm(_ text: String, _ term: String) -> Bool {
+        guard !term.isEmpty else { return true }
+        if term.contains(where: { $0.isLetter && !$0.isASCII }) {
+            return text.contains(term)
+        }
+        let lowerText = text.lowercased()
+        let lowerTerm = term.lowercased()
+        var from = lowerText.startIndex
+        while let range = lowerText.range(of: lowerTerm, range: from..<lowerText.endIndex) {
+            let beforeOK = range.lowerBound == lowerText.startIndex
+                || !isWordChar(lowerText[lowerText.index(before: range.lowerBound)])
+            let afterOK = range.upperBound == lowerText.endIndex
+                || !isWordChar(lowerText[range.upperBound])
+            if beforeOK && afterOK { return true }
+            from = range.upperBound
+        }
+        return false
+    }
+
+    private static func isWordChar(_ c: Character) -> Bool {
+        c.isLetter || c.isNumber || c == "_"
     }
 }

@@ -28,6 +28,15 @@ final class PDFTranslationTests: XCTestCase {
         XCTAssertEqual(paras[0].text, "这是第一行没有句号的长句子")
     }
 
+    func testWrappedEnglishLinesJoinWithSpace() {
+        // N2: "The quick brown" + "fox jumps" must not become
+        // "brownfox".
+        let content = page(lines: [line("The quick brown", y: 700), line("fox jumps", y: 682)])
+        let paras = content.paragraphs
+        XCTAssertEqual(paras.count, 1)
+        XCTAssertEqual(paras[0].text, "The quick brown fox jumps")
+    }
+
     func testSentenceEndPlusWiderGapStartsNewParagraph() {
         // First line ends with 。 and the gap (10 > 0.4 * 14) is wider
         // than normal leading: new paragraph.

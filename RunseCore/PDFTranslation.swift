@@ -103,14 +103,26 @@ public struct PDFPageContent: Sendable {
         for line in lines.dropFirst() {
             let prev = current.last!
             if startsNewParagraph(after: prev, next: line) {
-                result.append(PDFParagraph(text: current.map(\.text).joined(), lines: current))
+                result.append(PDFParagraph(text: Self.joinLines(current), lines: current))
                 current = [line]
             } else {
                 current.append(line)
             }
         }
-        result.append(PDFParagraph(text: current.map(\.text).joined(), lines: current))
+        result.append(PDFParagraph(text: Self.joinLines(current), lines: current))
         return result
+    }
+
+    /// N2: join wrapped lines with a space only at a Latin/digit
+    /// boundary, so "The quick brown" + "fox jumps" does not become
+    /// "brownfox". CJK characters join directly, and a trailing
+    /// hyphen keeps the word whole ("well-" + "known").
+    private static func joinLines(_ lines: [PDFTextLine]) -> String {
+        lines.map(\.text).reduce("") { acc, next in
+            guard let last = acc.last, let first = next.first else { return acc + next }
+            let latinAlnum: (Character) -> Bool = { $0.isASCII && ($0.isLetter || $0.isNumber) }
+            return acc + (latinAlnum(last) && latinAlnum(first) ? " " : "") + next
+        }
     }
 
     private func startsNewParagraph(after prev: PDFTextLine, next: PDFTextLine) -> Bool {

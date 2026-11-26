@@ -157,4 +157,22 @@ final class InterpretationTests: XCTestCase {
         XCTAssertTrue(GlossaryAST.missingTerms(in: "Welcome to Zhiyin", glossary: glossary).map(\.source) == ["量子计算"])
         XCTAssertTrue(GlossaryAST.missingTerms(in: "Welcome to Zhiyin, quantum computing", glossary: glossary).isEmpty)
     }
+
+    func testMissingTermsWordBoundaryAndCase() {
+        // N3: "bank" must not match "banking", and "Bank" must match "bank".
+        let glossary = [("银行", "bank")]
+        XCTAssertTrue(GlossaryAST.missingTerms(in: "I went to the bank", glossary: glossary).isEmpty)
+        XCTAssertTrue(GlossaryAST.missingTerms(in: "I went to the Bank", glossary: glossary).isEmpty)
+        XCTAssertTrue(GlossaryAST.missingTerms(in: "banking is hard", glossary: glossary).map(\.source) == ["银行"])
+    }
+
+    func testTermsAppearingFiltersBySentence() {
+        // N3: only the terms whose source appears in this sentence
+        // are passed to the post-check.
+        let glossary = [("量子计算", "quantum computing"), ("智音", "Zhiyin")]
+        XCTAssertEqual(GlossaryAST.termsAppearing(in: "欢迎使用智音", from: glossary).map(\.source), ["智音"])
+        // Latin branch: an English source term matches case-insensitively.
+        let enGlossary = [("quantum computing", "量子计算"), ("Zhiyin", "智音")]
+        XCTAssertEqual(GlossaryAST.termsAppearing(in: "quantum computing is hard", from: enGlossary).map(\.source), ["quantum computing"])
+    }
 }

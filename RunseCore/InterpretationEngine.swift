@@ -678,8 +678,12 @@ public final class InterpretationEngine: ObservableObject {
             // Glossary post-check: the live path only hints the
             // model, but here the terms can be enforced. Re-ask once
             // with the missed terms spelled out as an instruction
-            // (not as text to translate).
-            let missed = GlossaryAST.missingTerms(in: translation, glossary: glossary)
+            // (not as text to translate). N3: only check the terms
+            // whose source appears in this sentence, or the whole
+            // table "misses" almost every sentence and each one
+            // pays for a wasted re-translation.
+            let relevant = GlossaryAST.termsAppearing(in: sentence, from: glossary)
+            let missed = GlossaryAST.missingTerms(in: translation, glossary: relevant)
             if !missed.isEmpty {
                 let note = "必须按术语表翻译：" + missed.map { "\($0.source)=\($0.target)" }.joined(separator: "，")
                 let retry = try? await translator(sentence, sourceLanguage, targetLanguage, note)
