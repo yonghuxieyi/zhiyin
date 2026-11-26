@@ -2,9 +2,17 @@ import RunseCore
 import SwiftData
 import SwiftUI
 
+/// Item 13 (UI redesign): the document page hides the floating pill
+/// nav (and its bottom inset) so the document gets the full screen.
+/// PDFView flips this on appear / off on disappear.
+final class PillNavState: ObservableObject {
+    @Published var isHidden = false
+}
+
 struct ContentView: View {
     @State private var selection: Tab = .translate
     @State private var showingGetStarted = false
+    @StateObject private var pillNavState = PillNavState()
     private let settings = SettingsStore()
 
     var body: some View {
@@ -23,13 +31,19 @@ struct ContentView: View {
             }
             .toolbar(.hidden, for: .tabBar)
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                Color.clear.frame(height: 76)
+                // Item 13: the document page hides the pill, so the
+                // inset collapses with it and the document gets the
+                // full height.
+                Color.clear.frame(height: pillNavState.isHidden ? 0 : 76)
             }
 
-            pillNav
-                .padding(.horizontal, 20)
-                .padding(.bottom, 8)
+            if !pillNavState.isHidden {
+                pillNav
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 8)
+            }
         }
+        .environmentObject(pillNavState)
         .fullScreenCover(isPresented: $showingGetStarted) {
             GetStartedGuideView {
                 settings.hasSeenGetStartedGuide = true

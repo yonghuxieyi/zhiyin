@@ -15,6 +15,11 @@ import UniformTypeIdentifiers
 /// off by default, on only for professional documents.
 struct PDFView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    /// Item 13: the document page hides the floating pill nav
+    /// (PillNavState) so the document gets the full
+    /// screen; it comes back when this page goes away.
+    @EnvironmentObject private var pillNavState: PillNavState
     @Query(sort: \ProviderProfile.name) private var profiles: [ProviderProfile]
     @Query(sort: \PromptTemplate.name) private var templates: [PromptTemplate]
     @Query(sort: \GlossaryEntry.sourceTerm) private var glossaryEntries: [GlossaryEntry]
@@ -34,6 +39,37 @@ struct PDFView: View {
     @State private var exportURL: URL?
     @State private var translationTask: Task<Void, Never>?
     @State private var loadTask: Task<Void, Never>?
+    /// Item 13: leaving mid-translation asks stop or continue.
+    @State private var showingLeavePrompt = false
+
+    /// Item 13: document hashes with a translation run in flight.
+    /// A run keeps going after its page is left (返回 → 继续翻译),
+    /// so a re-entered page must not start a second run for the
+    /// same document — the file-backed progress would interleave.
+    /// @MainActor because every access is from @MainActor code.
+    @MainActor private static var runningDocumentHashes: Set<String> = []
+
+    /// Item 13: a run for this document is already going in the
+    /// background (its page was left with 继续翻译).
+    @MainActor
+    private var isBackgroundTranslating: Bool {
+        guard let hash = documentHash else { return false }
+        return Self.runningDocumentHashes.contains(hash)
+    }
+
+    /// Item 13: rough token estimate for the whole document, so the
+    /// user can judge the cost before starting. CJK ≈ 1.5
+    /// tokens/char, other text ≈ 0.25 tokens/char — a labelled
+    /// estimate, not a count.
+    @MainActor
+    private var estimatedTokens: Int {
+        let text = pages.map(\.plainText).joined()
+        var total = 0.0
+        for scalar in text.unicodeScalars {
+            total += scalar.properties.isIdeographic ? 1.5 : 0.25
+        }
+        return Int(total.rounded())
+    }
 
     /// The dual-model switch reads/writes SettingsStore directly
     /// instead of a `@State` snapshot: the old snapshot was
@@ -51,6 +87,28 @@ struct PDFView: View {
 
     var body: some View {
         Form {
+            // Item 13 (22:39 point 5): the dual-model switch sits at
+            // the top centre of the document page.
+            if document != nil {
+                Section {
+                    HStack {
+                        Spacer()
+                        Text("双模型交叉校对")
+                        Toggle("", isOn: dualModelCheckBinding)
+                            .labelsHidden()
+                        Spacer()
+                    }
+                    Text("平时默认关。打开后每段都由第二模型复核，分歧时按裁判规则选（术语命中优先）。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if let dualCheckNote {
+                        Text(dualCheckNote)
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+
             Section("文档") {
                 Button {
                     showingPicker = true
@@ -66,18 +124,6 @@ struct PDFView: View {
             }
 
             if document != nil {
-                Section("校对") {
-                    Toggle("双模型交叉校对（专业文档）", isOn: dualModelCheckBinding)
-                    Text("平时默认关。打开后每段都由第二模型复核，分歧时按裁判规则选（术语命中优先）。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    if let dualCheckNote {
-                        Text(dualCheckNote)
-                            .font(.footnote)
-                            .foregroundStyle(.orange)
-                    }
-                }
-
                 HStack {
                     Button {
                         translationTask = Task { await runTranslation() }
@@ -88,7 +134,7 @@ struct PDFView: View {
                             Label(translated.isEmpty ? "翻译全文" : "继续翻译", systemImage: "globe")
                         }
                     }
-                    .disabled(pages.isEmpty || isWorking)
+                    .disabled(pages.isEmpty || isWorking || isBackgroundTranslating)
                     if isWorking {
                         Button {
                             translationTask?.cancel()
@@ -105,6 +151,19 @@ struct PDFView: View {
                     }
                 }
                 .buttonStyle(.borderless)
+
+                // Item 13: a background run is already translating
+                // this document — show that instead of the estimate,
+                // and keep the start button disabled above.
+                if isBackgroundTranslating {
+                    Text("后台还在翻译这篇文档，进度会自动保存。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if !pages.isEmpty {
+                    Text("预计约 \(estimatedTokens) token（全文估算）")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
 
                 if isWorking {
                     Text(progress)
@@ -158,6 +217,38 @@ struct PDFView: View {
             }
         }
         .navigationTitle("PDF 翻译")
+        // Item 13 (22:39 point 1): a small back chevron at the
+        // top-left instead of the system back button — tapping it
+        // mid-translation asks stop or continue first.
+        .navigationBarBackButtonHidden(true)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    backTapped()
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .accessibilityLabel("返回")
+            }
+        }
+        // Item 13 (22:39 point 1): the pill is gone on this page so
+        // the document gets the full screen.
+        .onAppear { pillNavState.isHidden = true }
+        .onDisappear { pillNavState.isHidden = false }
+        // Item 13 (22:39 point 4): leaving mid-translation asks
+        // stop or continue. Continuing pops the page and the run
+        // carries on in the background (screen off / locked included
+        // — the run disables the idle timer and persists per page).
+        .alert("正在翻译文档", isPresented: $showingLeavePrompt) {
+            Button("停止翻译", role: .destructive) {
+                stopAndLeave()
+            }
+            Button("继续翻译") {
+                dismiss()
+            }
+        } message: {
+            Text("离开后翻译会在后台继续，熄屏、锁屏都不会停，进度已保存，回来可以接着看。")
+        }
         .fileImporter(isPresented: $showingPicker, allowedContentTypes: [.pdf]) { result in
             switch result {
             case .success(let url):
@@ -289,9 +380,60 @@ struct PDFView: View {
         try? PDFProgressStore.save(hash: hash, fileName: fileName, pageCount: pages.count, pages: translated)
     }
 
+    /// Item 13 (22:39 point 4): the back chevron. Not translating —
+    /// leave at once. Translating — ask stop or continue. Still
+    /// importing (no translation run yet) — cancel the import and
+    /// leave: nothing is saved yet, so there is no background run
+    /// to continue.
+    @MainActor
+    private func backTapped() {
+        if translationTask != nil {
+            showingLeavePrompt = true
+        } else if isWorking {
+            loadTask?.cancel()
+            dismiss()
+        } else {
+            dismiss()
+        }
+    }
+
+    /// Item 13: stop the run and leave the page.
+    @MainActor
+    private func stopAndLeave() {
+        translationTask?.cancel()
+        loadTask?.cancel()
+        dismiss()
+    }
+
     @MainActor
     private func runTranslation() async {
         guard let document else { return }
+        // Item 13 (22:39 point 3): no usable translation service —
+        // do not start. There is no balance API to query, so the
+        // checkable precondition is a configured provider + key; a
+        // 402 mid-run still surfaces as 余额不足 (LLMProviderError).
+        let request: TranslationRequestContext
+        do {
+            request = try await TranslationRequestResolver.resolve(profiles: profiles, templates: templates)
+        } catch {
+            errorMessage = "不能开始翻译：" + ((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+            // The gate returned before the defer below was installed,
+            // so clear the task handle here — otherwise backTapped
+            // would think a run is still going.
+            translationTask = nil
+            return
+        }
+        // Item 13: a run for this document may already be going in
+        // the background (left via 返回 → 继续翻译) — never run two.
+        let runHash = documentHash
+        if let runHash, Self.runningDocumentHashes.contains(runHash) {
+            errorMessage = "这篇文档正在后台翻译，进度会自动保存，稍后再来接着看。"
+            translationTask = nil
+            return
+        }
+        if let runHash {
+            Self.runningDocumentHashes.insert(runHash)
+        }
         isWorking = true
         // M11: a long document takes a while — keep the screen awake
         // until translation finishes (or fails / is cancelled).
@@ -302,10 +444,12 @@ struct PDFView: View {
         defer {
             isWorking = false
             translationTask = nil
+            if let runHash {
+                Self.runningDocumentHashes.remove(runHash)
+            }
             UIApplication.shared.isIdleTimerDisabled = false
         }
         do {
-            let request = try await TranslationRequestResolver.resolve(profiles: profiles, templates: templates)
             let profile = request.profile
             let apiKey = request.apiKey
             let template = request.template
