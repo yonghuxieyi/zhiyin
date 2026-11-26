@@ -148,8 +148,17 @@ struct ExtensionRootView: View {
             guard let profile = profiles.first(where: \.isDefault) ?? profiles.first else {
                 throw LLMProviderError.invalidURL
             }
-            let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
-            let apiKey = try await keychain.load(service: KeychainStore.providerAPIKeyService, account: profile.id)
+            // N1: Qwen-MT keys live in DashScopeStore, not ProviderKeyStore.
+            // The extension had its own copy of the resolve logic with
+            // the same bug: picking Qwen-MT as the main model made the
+            // share extension report missingAPIKey too.
+            let apiKey: String?
+            if profile.isQwenMT {
+                apiKey = await DashScopeStore.loadKey()
+            } else {
+                let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
+                apiKey = try await keychain.load(service: KeychainStore.providerAPIKeyService, account: profile.id)
+            }
             guard let apiKey, !apiKey.isEmpty else { throw LLMProviderError.missingAPIKey }
             let template = templates.first { $0.action == action } ?? PromptTemplate.builtIns().first { $0.action == action }!
             let context = PromptContext(

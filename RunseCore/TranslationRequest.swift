@@ -41,7 +41,16 @@ public enum TranslationRequestResolver {
             ?? profiles.first(where: \.isDefault) ?? profiles.first else {
             throw LLMProviderError.invalidURL
         }
-        guard let stored = await ProviderKeyStore.loadKey(profileID: profile.id) else {
+        // N1: Qwen-MT keys live in DashScopeStore, not ProviderKeyStore.
+        // Reading the wrong store made every screen report missingAPIKey
+        // as soon as Qwen-MT was picked as the main model.
+        let stored: String?
+        if profile.isQwenMT {
+            stored = await DashScopeStore.loadKey()
+        } else {
+            stored = await ProviderKeyStore.loadKey(profileID: profile.id)
+        }
+        guard let stored else {
             throw LLMProviderError.missingAPIKey
         }
         let apiKey = stored.trimmingCharacters(in: .whitespacesAndNewlines)
