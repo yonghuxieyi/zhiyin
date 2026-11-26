@@ -42,6 +42,7 @@ struct TranslateView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
+                    docEntry
                     languageCard
                     inputCard
 
@@ -95,7 +96,6 @@ struct TranslateView: View {
 
                     toneRow
                     glossaryRow
-                    docRow
                 }
                 .padding()
             }
@@ -126,11 +126,14 @@ struct TranslateView: View {
                         Image(systemName: "ellipsis.circle")
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { inputFocused = false } label: {
-                        Image(systemName: "checkmark")
+                // Item 3: the checkmark only shows once text has been entered.
+                if !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { inputFocused = false } label: {
+                            Image(systemName: "checkmark")
+                        }
+                        .accessibilityLabel("完成")
                     }
-                    .accessibilityLabel("完成")
                 }
             }
             .sheet(isPresented: $showingGlossary) {
@@ -429,19 +432,17 @@ struct TranslateView: View {
         .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
-    /// Kept here until item 3 moves the document entry to the top
-    /// center of the home page.
-    private var docRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            NavigationLink("翻译 PDF 文档") {
-                PDFView()
-            }
-            Text("导入 PDF，按页翻译，导出保留排版的译文 PDF。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+    /// Item 3 (UI redesign): document entry at the top center of the
+    /// home page — just the two characters 文档 with an icon.
+    private var docEntry: some View {
+        NavigationLink {
+            PDFView()
+        } label: {
+            Label("文档", systemImage: "doc.text")
+                .font(.headline)
         }
-        .padding()
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     private var targetLanguage: String {
