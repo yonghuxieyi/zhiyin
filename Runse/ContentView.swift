@@ -8,22 +8,27 @@ struct ContentView: View {
     private let settings = SettingsStore()
 
     var body: some View {
-        TabView(selection: $selection) {
-            TranslateView()
-                .tabItem { Label("翻译", systemImage: "text.badge.checkmark") }
-                .tag(Tab.translate)
-            VoiceView()
-                .tabItem { Label("语音", systemImage: "mic") }
-                .tag(Tab.voice)
-            InterpretationView()
-                .tabItem { Label("同传", systemImage: "bubble.left.and.bubble.right") }
-                .tag(Tab.interpret)
-            PhotoView()
-                .tabItem { Label("拍照", systemImage: "camera") }
-                .tag(Tab.photo)
-            SettingsView()
-                .tabItem { Label("设置", systemImage: "gearshape") }
-                .tag(Tab.settings)
+        ZStack(alignment: .bottom) {
+            // Item 1 (UI redesign): the system tab bar is gone — a
+            // floating pill switches between 翻译 / 相机 / 对话.
+            // TabView stays underneath so each page keeps its state
+            // and its onDisappear cleanup when you leave it.
+            TabView(selection: $selection) {
+                TranslateView()
+                    .tag(Tab.translate)
+                LiveCameraView()
+                    .tag(Tab.camera)
+                FaceToFaceView()
+                    .tag(Tab.conversation)
+            }
+            .toolbar(.hidden, for: .tabBar)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                Color.clear.frame(height: 76)
+            }
+
+            pillNav
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
         }
         .fullScreenCover(isPresented: $showingGetStarted) {
             GetStartedGuideView {
@@ -41,8 +46,59 @@ struct ContentView: View {
         }
     }
 
-    enum Tab {
-        case translate, voice, interpret, photo, settings
+    /// Floating pill nav: 翻译 / 相机 / 对话. The camera and
+    /// conversation icons are placeholders until item 16 swaps in
+    /// the boss's custom assets (light-blue circle, two people +
+    /// mic for conversation; headphones for live interpretation).
+    private var pillNav: some View {
+        HStack(spacing: 0) {
+            ForEach(Tab.allCases, id: \.self) { tab in
+                Button {
+                    selection = tab
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: tab.icon)
+                            .font(.system(size: 20, weight: .semibold))
+                        Text(tab.title)
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .foregroundStyle(selection == tab ? .white : .primary)
+                    .background(
+                        Capsule().fill(selection == tab ? Color.green : Color.clear)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(tab.title)
+            }
+        }
+        .padding(6)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay {
+            Capsule().stroke(Color.secondary.opacity(0.15))
+        }
+        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+    }
+
+    enum Tab: CaseIterable, Hashable {
+        case translate, camera, conversation
+
+        var title: String {
+            switch self {
+            case .translate: "翻译"
+            case .camera: "相机"
+            case .conversation: "对话"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .translate: "text.badge.checkmark"
+            case .camera: "camera"
+            case .conversation: "person.2.fill"
+            }
+        }
     }
 }
 
