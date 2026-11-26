@@ -60,10 +60,20 @@ struct ContentView: View {
         }
     }
 
-    /// Floating pill nav: 翻译 / 相机 / 对话. The camera and
-    /// conversation icons are placeholders until item 16 swaps in
-    /// the boss's custom assets (light-blue circle, two people +
-    /// mic for conversation; headphones for live interpretation).
+    /// Floating pill nav: 翻译 / 相机 / 对话.
+    ///
+    /// Item 16 (UI redesign): the conversation tab is the real-time
+    /// translation entry (face-to-face, 20:53 — no separate entry),
+    /// so it uses the two-people icon the boss sent (light-blue
+    /// circle, two people + mic, 21:07), drawn here as the
+    /// two-people glyph to match the approved web preview — the
+    /// image file itself is not in the workspace. The icon is one
+    /// size bigger than the other two tabs ("做大一圈", 21:51 /
+    /// preview: 33px vs 24px) and its slot is a touch wider.
+    /// There is no separate interpretation icon: 同传 merged into
+    /// the conversation page as continuous mode, and the boss's
+    /// correction superseded "make the interpretation icon bigger"
+    /// with "make the conversation icon bigger" instead.
     private var pillNav: some View {
         HStack(spacing: 0) {
             ForEach(Tab.allCases, id: \.self) { tab in
@@ -72,7 +82,7 @@ struct ContentView: View {
                 } label: {
                     VStack(spacing: 3) {
                         Image(systemName: tab.icon)
-                            .font(.system(size: 20, weight: .semibold))
+                            .font(.system(size: tab.iconSize, weight: .semibold))
                         Text(tab.title)
                             .font(.caption2.weight(.semibold))
                     }
@@ -85,6 +95,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(tab.title)
+                .layoutPriority(tab == .conversation ? 1 : 0)
             }
         }
         .padding(6)
@@ -111,6 +122,16 @@ struct ContentView: View {
             case .translate: "text.badge.checkmark"
             case .camera: "camera"
             case .conversation: "person.2.fill"
+            }
+        }
+
+        /// Item 16: the conversation icon is one size bigger
+        /// ("做大一圈") — 28pt vs 20pt, same ratio as the approved
+        /// web preview (33px vs 24px).
+        var iconSize: CGFloat {
+            switch self {
+            case .conversation: 28
+            case .translate, .camera: 20
             }
         }
     }
