@@ -60,10 +60,159 @@ struct FaceToFaceView: View {
     /// so a broken socket does not poison later turns, and on
     /// disappear.
     @State private var streamingTTSClient: VolcanoStreamingTTSClient?
+    /// Item 7 (UI redesign): single-person mode is the default
+    /// (21:33); the view picker switches to face-to-face.
+    @State private var isSingleMode = true
+    @State private var showingViewPicker = false
 
     private var latestTurn: FaceTurn? { turns.last }
 
     var body: some View {
+        NavigationStack {
+            Group {
+                if isSingleMode {
+                    singleModeView
+                } else {
+                    dualModeView
+                }
+            }
+            .navigationTitle(isSingleMode ? "对话" : "面对面")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar(isSingleMode ? .visible : .hidden, for: .navigationBar)
+            .toolbar {
+                if isSingleMode {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            showingViewPicker = true
+                        } label: {
+                            Image(systemName: "person")
+                        }
+                        .accessibilityLabel("视图")
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showingViewPicker) {
+            ConversationViewPicker(isSingleMode: $isSingleMode)
+        }
+        .task {
+            config = await VolcanoVoiceStore.load()
+        }
+        .onDisappear {
+            // N6: leaving the page must stop the mic / ASR socket,
+            // or recording keeps uploading with no UI and the mic
+            // indicator stays on.
+            if listeningSide != nil {
+                Task { await stopListening() }
+            }
+            // S14: drop the reused streaming TTS connection too.
+            if let client = streamingTTSClient {
+                streamingTTSClient = nil
+                Task { await client.disconnect() }
+            }
+        }
+    }
+
+    /// Item 7: single-person mode (the default, 21:33) — a
+    /// conversation list with the mic at the bottom of the screen
+    /// (23:28). No language-pair row, no middle instruction card,
+    /// no bottom continuous-mode card (23:21 — none of the three
+    /// exist in this view, so single mode is built without them);
+    /// continuous mode stays on the mic long-press (item 8).
+    private var singleModeView: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(turns) { turn in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(turn.source)
+                                .font(.body)
+                            Text(turn.translation)
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if !liveTranscript.isEmpty {
+                        Text(liveTranscript)
+                            .font(.callout)
+                            .foregroundStyle(.tertiary)
+                    }
+                    if turns.isEmpty && liveTranscript.isEmpty {
+                        Text("点下面的麦克风说话，译文会出现在这里。")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 32)
+                    }
+                }
+                .padding()
+            }
+            VStack(spacing: 12) {
+                HStack {
+                    Spacer()
+                    Button {
+                        Task { await replayLatest() }
+                    } label: {
+                        Label("重播", systemImage: "speaker.wave.2")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(latestTurn == nil || isWorking)
+                    Spacer()
+                    Button {
+                        toggleTask = Task { await toggleSingleListening() }
+                    } label: {
+                        Image(systemName: listeningSide != nil ? "stop.fill" : "mic.fill")
+                            .font(.title2)
+                            .frame(width: 72, height: 72)
+                            .background(Color.accentColor, in: Circle())
+                            .foregroundStyle(.white)
+                    }
+                    .disabled(isWorking)
+                    .accessibilityLabel(listeningSide != nil ? "停止" : "开始说话")
+                    Spacer()
+                    if isWorking {
+                        Button {
+                            toggleTask?.cancel()
+                        } label: {
+                            Label("取消", systemImage: "xmark.circle")
+                        }
+                        .buttonStyle(.bordered)
+                    } else {
+                        Color.clear.frame(width: 76, height: 36)
+                    }
+                    Spacer()
+                }
+                errorBlock
+            }
+            .padding()
+        }
+    }
+
+    /// Item 7: the mic-permission error + Settings shortcut,
+    /// shared by both modes (was inline in the dual layout).
+    @ViewBuilder
+    private var errorBlock: some View {
+        if let errorMessage {
+            Text(errorMessage)
+                .font(.footnote)
+                .foregroundStyle(.red)
+            // N7: denied mic permission gets a one-tap way
+            // to Settings instead of just a message.
+            if errorMessage.hasPrefix("麦克风权限未开启") {
+                Button("去设置打开麦克风权限") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+                .font(.footnote)
+            }
+        }
+    }
+
+    /// Item 7: face-to-face mode — the original split layout
+    /// (top half rotated 180° for the person across).
+    private var dualModeView: some View {
         VStack(spacing: 0) {
             // Top half: the person across. Rotated 180° so they read
             // it upright. Shows the translation big, the original small.
@@ -150,43 +299,51 @@ struct FaceToFaceView: View {
                         .buttonStyle(.bordered)
                         .disabled(latestTurn == nil || isWorking)
                     }
-                    if let errorMessage {
-                        Text(errorMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                        // N7: denied mic permission gets a one-tap way
-                        // to Settings instead of just a message.
-                        if errorMessage.hasPrefix("麦克风权限未开启") {
-                            Button("去设置打开麦克风权限") {
-                                if let url = URL(string: UIApplication.openSettingsURLString) {
-                                    UIApplication.shared.open(url)
-                                }
-                            }
-                            .font(.footnote)
-                        }
-                    }
+                    errorBlock
                 }
                 .padding()
             }
         }
-        .navigationTitle("面对面")
-        .navigationBarTitleDisplayMode(.inline)
-        .task {
-            config = await VolcanoVoiceStore.load()
-        }
-        .onDisappear {
-            // N6: leaving the page must stop the mic / ASR socket,
-            // or recording keeps uploading with no UI and the mic
-            // indicator stays on.
-            if listeningSide != nil {
-                Task { await stopListening() }
+        // Item 7 (23:24): in face-to-face mode the view button
+        // moves to the bottom-left corner, and the bottom-right
+        // becomes an X that goes back to single mode.
+        .overlay(alignment: .bottom) {
+            HStack {
+                Button {
+                    showingViewPicker = true
+                } label: {
+                    Image(systemName: "person.2")
+                        .font(.title3)
+                        .frame(width: 44, height: 44)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .accessibilityLabel("视图")
+                Spacer()
+                Button {
+                    isSingleMode = true
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.title3)
+                        .frame(width: 44, height: 44)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .accessibilityLabel("返回单人模式")
             }
-            // S14: drop the reused streaming TTS connection too.
-            if let client = streamingTTSClient {
-                streamingTTSClient = nil
-                Task { await client.disconnect() }
-            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
         }
+    }
+
+    /// Item 7: single-mode mic — one button for both directions
+    /// (direction is auto-detected per turn). Tap to start, tap
+    /// again to stop; long-press for continuous mode is item 8.
+    @MainActor
+    private func toggleSingleListening() async {
+        if listeningSide != nil {
+            await stopListening()
+            return
+        }
+        await toggleListening(side: .me)
     }
 
     @MainActor
@@ -400,6 +557,53 @@ struct FaceToFaceView: View {
                 return
             } catch {
                 errorMessage = "语音合成失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+            }
+        }
+    }
+}
+
+/// Item 7 (UI redesign, 23:01): the Apple-style view picker —
+/// 面对面 and 单人 (the old "对话" label is now "单人").
+/// Opened from the top-left view button in single mode, and from
+/// the bottom-left button in face-to-face mode.
+private struct ConversationViewPicker: View {
+    @Binding var isSingleMode: Bool
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Button {
+                    isSingleMode = false
+                    dismiss()
+                } label: {
+                    HStack {
+                        Label("面对面", systemImage: "person.2")
+                        Spacer()
+                        if !isSingleMode {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+                Button {
+                    isSingleMode = true
+                    dismiss()
+                } label: {
+                    HStack {
+                        Label("单人", systemImage: "person")
+                        Spacer()
+                        if isSingleMode {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+            .navigationTitle("视图")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
             }
         }
     }
