@@ -262,22 +262,30 @@ struct TranslateView: View {
                 segments[failedIndex].error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
             fallbackUsed = pipeline.lastFallbackUsed
-            let usage = pipeline.lastUsage
-            modelContext.insert(TransformHistory(
-                providerID: profile.id,
-                sourceExcerpt: TextExcerpt.make(inputText),
-                resultExcerpt: TextExcerpt.make(results.map(\.translation).joined(separator: "\n")),
-                providerName: profile.name,
-                model: profile.model,
-                action: .translate,
-                targetLanguage: targetLanguage,
-                status: outcome.isComplete
-                    ? (pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success")
-                    : "partial · 第 \(outcome.failedSegmentIndex! + 1) 段失败",
-                promptTokens: usage["prompt_tokens"] ?? 0,
-                completionTokens: usage["completion_tokens"] ?? 0,
-                totalTokens: usage["total_tokens"] ?? 0
-            ))
+            // F1: one history row per model that actually translated —
+            // booking the mixed total under the primary model priced
+            // Qwen-MT fallback tokens at DeepSeek rates.
+            let usageByModel = pipeline.lastUsageByModel
+            let models = usageByModel.isEmpty ? [profile.model] : [profile.model] + usageByModel.keys.filter { $0 != profile.model }.sorted()
+            for model in models {
+                let usage = usageByModel[model] ?? [:]
+                let isFallback = model != profile.model
+                modelContext.insert(TransformHistory(
+                    providerID: isFallback ? (fallback?.profile.id ?? profile.id) : profile.id,
+                    sourceExcerpt: TextExcerpt.make(inputText),
+                    resultExcerpt: TextExcerpt.make(results.map(\.translation).joined(separator: "\n")),
+                    providerName: isFallback ? (fallback?.profile.name ?? profile.name) : profile.name,
+                    model: model,
+                    action: .translate,
+                    targetLanguage: targetLanguage,
+                    status: outcome.isComplete
+                        ? (pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success")
+                        : "partial · 第 \(outcome.failedSegmentIndex! + 1) 段失败",
+                    promptTokens: usage["prompt_tokens"] ?? 0,
+                    completionTokens: usage["completion_tokens"] ?? 0,
+                    totalTokens: usage["total_tokens"] ?? 0
+                ))
+            }
             try? modelContext.save()
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

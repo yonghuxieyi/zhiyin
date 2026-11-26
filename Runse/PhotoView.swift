@@ -1,4 +1,5 @@
 import PhotosUI
+import ImageIO
 import RunseCore
 import SwiftData
 import SwiftUI
@@ -36,6 +37,13 @@ struct PhotoView: View {
                         Task { await loadPhoto(item) }
                     }
                     Button {
+                        // N12: presenting a .camera picker on a
+                        // device without a camera crashes. Check
+                        // first and say so instead of opening it.
+                        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+                            errorMessage = "这台设备没有相机。"
+                            return
+                        }
                         showingCamera = true
                     } label: {
                         Label("拍照", systemImage: "camera")
@@ -124,6 +132,22 @@ struct PhotoView: View {
         }
     }
 
+    /// N10: UIImage.Orientation → CGImagePropertyOrientation, so
+    /// Vision reads a portrait photo upright instead of sideways.
+    private static func cgOrientation(from uiOrientation: UIImage.Orientation) -> CGImagePropertyOrientation {
+        switch uiOrientation {
+        case .up: return .up
+        case .down: return .down
+        case .left: return .left
+        case .right: return .right
+        case .upMirrored: return .upMirrored
+        case .downMirrored: return .downMirrored
+        case .leftMirrored: return .leftMirrored
+        case .rightMirrored: return .rightMirrored
+        @unknown default: return .up
+        }
+    }
+
     @MainActor
     private func recognize(_ image: UIImage) async {
         isWorking = true
@@ -135,7 +159,9 @@ struct PhotoView: View {
             return
         }
         do {
-            let lines = try await VisionTextRecognizer.recognizeText(in: cgImage)
+            // N10: pass the photo's orientation — the CGImage pixels
+            // of a portrait photo are landscape.
+            let lines = try await VisionTextRecognizer.recognizeText(in: cgImage, orientation: Self.cgOrientation(from: image.imageOrientation))
             recognizedText = VisionTextRecognizer.plainText(from: lines)
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -172,20 +198,28 @@ struct PhotoView: View {
                 translation = partials.joined(separator: "\n")
             }
             translation = results.map(\.translation).joined(separator: "\n")
-            let usage = pipeline.lastUsage
-            modelContext.insert(TransformHistory(
-                providerID: profile.id,
-                sourceExcerpt: TextExcerpt.make(recognizedText),
-                resultExcerpt: TextExcerpt.make(translation),
-                providerName: profile.name,
-                model: profile.model,
-                action: .translate,
-                targetLanguage: target,
-                status: pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success",
-                promptTokens: usage["prompt_tokens"] ?? 0,
-                completionTokens: usage["completion_tokens"] ?? 0,
-                totalTokens: usage["total_tokens"] ?? 0
-            ))
+            // F1: one history row per model that actually translated —
+            // booking the mixed total under the primary model priced
+            // Qwen-MT fallback tokens at DeepSeek rates.
+            let usageByModel = pipeline.lastUsageByModel
+            let models = usageByModel.isEmpty ? [profile.model] : [profile.model] + usageByModel.keys.filter { $0 != profile.model }.sorted()
+            for model in models {
+                let usage = usageByModel[model] ?? [:]
+                let isFallback = model != profile.model
+                modelContext.insert(TransformHistory(
+                    providerID: isFallback ? (fallback?.profile.id ?? profile.id) : profile.id,
+                    sourceExcerpt: TextExcerpt.make(recognizedText),
+                    resultExcerpt: TextExcerpt.make(translation),
+                    providerName: isFallback ? (fallback?.profile.name ?? profile.name) : profile.name,
+                    model: model,
+                    action: .translate,
+                    targetLanguage: target,
+                    status: pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success",
+                    promptTokens: usage["prompt_tokens"] ?? 0,
+                    completionTokens: usage["completion_tokens"] ?? 0,
+                    totalTokens: usage["total_tokens"] ?? 0
+                ))
+            }
             try? modelContext.save()
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

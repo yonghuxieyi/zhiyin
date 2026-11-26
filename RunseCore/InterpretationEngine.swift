@@ -133,6 +133,11 @@ public final class InterpretationEngine: ObservableObject {
     /// anything from an older generation is ignored — otherwise an
     /// old session's teardown could kill a freshly started one.
     private var sessionGeneration = 0
+    /// D1: clients whose start() is still being awaited in
+    /// startLiveSessions. stop() cannot see them through
+    /// forwardClient/reverseClient yet, so they are tracked here to
+    /// be cancelled immediately instead of reviving the session.
+    private var connectingClients: [LiveInterpretClient] = []
     /// M10: when the session was paused, to decide on resume whether
     /// the socket is too stale to continue.
     private var pausedAt: Date?
@@ -160,9 +165,11 @@ public final class InterpretationEngine: ObservableObject {
         for task in eventTasks { task.cancel() }
         let forward = forwardClient
         let reverse = reverseClient
-        Task { [forward, reverse] in
+        let connecting = connectingClients
+        Task { [forward, reverse, connecting] in
             await forward?.cancel()
             await reverse?.cancel()
+            for client in connecting { await client.cancel() }
         }
     }
 
@@ -246,6 +253,11 @@ public final class InterpretationEngine: ObservableObject {
         // trigger a fallback switch on the way out.
         phase = .stopped
         sessionEndTime = .now
+        // D1: cancel clients still connecting — they only exist as
+        // locals in startLiveSessions, so without this the awaited
+        // start() would return after stop() and go live again.
+        for client in connectingClients { await client.cancel() }
+        connectingClients = []
         retryTask?.cancel()
         retryTask = nil
         audioFeedTask?.cancel()
@@ -342,8 +354,10 @@ public final class InterpretationEngine: ObservableObject {
                 glossary: glossary
             )
             let client = LiveInterpretClient(config: config, sessionConfig: sessionConfig)
+            connectingClients.append(client)
             do {
                 let stream = try await client.start()
+                connectingClients.removeAll { $0 === client }
                 if isForward {
                     forwardClient = client
                     forwardAssembler = InterpretationSegmentAssembler(direction: dir == .enToZh ? .enToZh : .zhToEn)
@@ -361,8 +375,24 @@ public final class InterpretationEngine: ObservableObject {
                 startedAny = true
                 startedCount += 1
             } catch {
+                connectingClients.removeAll { $0 === client }
                 lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
+        }
+
+        // D1: stop() may have run while a client was still
+        // connecting (its start() was awaited above, so stop() could
+        // not see or cancel it through forwardClient). Never revive
+        // a stopped session: drop the clients and return without
+        // going live or falling back.
+        if phase == .stopped || generation != sessionGeneration {
+            for task in eventTasks { task.cancel() }
+            eventTasks = []
+            if let forwardClient { await forwardClient.cancel() }
+            if let reverseClient { await reverseClient.cancel() }
+            forwardClient = nil
+            reverseClient = nil
+            return
         }
 
         if startedAny {
@@ -460,6 +490,16 @@ public final class InterpretationEngine: ObservableObject {
     }
 
     private func handleAudioError(_ error: Error) async {
+        // N7: a denied mic permission is a setup problem, not a
+        // mid-session interruption — surface it as-is (no fallback:
+        // the fallback line needs the mic too) so the view can offer
+        // the Settings button for it.
+        if let recorderError = error as? VoiceRecorder.RecorderError,
+           case .micPermissionDenied = recorderError {
+            errorMessage = recorderError.localizedDescription
+            phase = .error
+            return
+        }
         // Mic errors end the session the same way a network loss
         // does: fall back if live, otherwise report and stop.
         if mode == .live {

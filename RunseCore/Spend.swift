@@ -5,6 +5,13 @@ import Foundation
 /// peak prices in CNY per 1M tokens (verified 2026-11-02); the UI labels
 /// the result an estimate because off-peak runs are half price and
 /// cache-hit input is cheaper.
+///
+/// F1: only DeepSeek rows are priced here. Qwen-MT fallback tokens are
+/// recorded under their own model ("qwen-mt-flash") by the pipeline, so
+/// they are excluded — pricing them at DeepSeek rates overstated the
+/// spend. Qwen-MT runs on DashScope's free quota, so no cost is shown
+/// for it; if it ever becomes paid, price it from its own rate card,
+/// not this one.
 public enum SpendCalculator {
     public static let flashInputYuanPerMillion: Double = 2
     public static let flashOutputYuanPerMillion: Double = 8

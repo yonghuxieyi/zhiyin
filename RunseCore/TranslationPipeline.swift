@@ -18,6 +18,12 @@ public final class TranslationPipeline {
     /// segments (primary and fallback). Views record it into history so
     /// the spend page can show real numbers.
     public private(set) var lastUsage: [String: Int] = [:]
+    /// F1: the same usage split by model ("deepseek-flash" vs
+    /// "qwen-mt-flash"). The mixed total in `lastUsage` must not be
+    /// recorded under the primary model — that priced Qwen-MT
+    /// fallback tokens at DeepSeek rates in the spend summary.
+    /// Views record one history row per model from this map.
+    public private(set) var lastUsageByModel: [String: [String: Int]] = [:]
     /// True when at least one segment fell back to the backup provider.
     public private(set) var lastFallbackUsed = false
 
@@ -94,6 +100,7 @@ public final class TranslationPipeline {
         onSegmentUpdate: @escaping (Int, String) -> Void
     ) async throws -> TranslationOutcome {
         lastUsage = [:]
+        lastUsageByModel = [:]
         lastFallbackUsed = false
         var results: [SegmentResult] = []
         var previous: SegmentResult?
@@ -221,6 +228,10 @@ public final class TranslationPipeline {
         onSegmentUpdate(index, translation)
         for (key, value) in response.usage {
             lastUsage[key, default: 0] += value
+            // F1: attribute this segment's tokens to the model that
+            // actually produced it, so fallback tokens are never
+            // priced as primary-model tokens.
+            lastUsageByModel[profile.model, default: [:]][key, default: 0] += value
         }
         return translation
     }

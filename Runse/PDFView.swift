@@ -222,7 +222,33 @@ struct PDFView: View {
             exportURL = nil
             return
         }
-        guard let data = PDFTranslation.exportPDF(original: document, translatedPages: translated) else {
+        // E4: the export must cover the whole document. After a
+        // resume (or mid-run) `translated` only holds finished
+        // pages — exporting just those silently dropped the rest, so
+        // the user would share a file missing pages. Fill every
+        // missing page with its source paragraphs (translation =
+        // original text) so the exported file is page-complete; the
+        // note below says which pages are still untranslated. This
+        // synthesis is export-only: persistProgress still saves just
+        // the finished pages.
+        let byIndex = Dictionary(uniqueKeysWithValues: translated.map { ($0.index, $0) })
+        var complete: [PDFTranslatedPage] = []
+        var missing = 0
+        for page in pages {
+            if let done = byIndex[page.index] {
+                complete.append(done)
+            } else {
+                missing += 1
+                let paras = page.paragraphs.map {
+                    PDFTranslatedParagraph(source: $0.text, translation: $0.text, bounds: $0.bounds)
+                }
+                complete.append(PDFTranslatedPage(index: page.index, paragraphs: paras, isScanned: page.isScanned, pageSize: page.pageSize))
+            }
+        }
+        if missing > 0 {
+            partialNote = "导出的 PDF 还有 \(missing) 页未翻译（保留原文），点“继续翻译”可补全。"
+        }
+        guard let data = PDFTranslation.exportPDF(original: document, translatedPages: complete) else {
             exportURL = nil
             return
         }
@@ -266,8 +292,7 @@ struct PDFView: View {
             let tone = SettingsStore().translationTone
             let dualModelCheck = SettingsStore().dualModelCheckEnabled
             let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
-            var totalPrompt = 0
-            var totalCompletion = 0
+            var totalUsageByModel: [String: (prompt: Int, completion: Int)] = [:]
             var didDualCheck = false
             var dualCheckAttempted = false
             var failedParagraphs = 0
@@ -313,8 +338,14 @@ struct PDFView: View {
                             fallbackProfile: fallback?.profile,
                             fallbackAPIKey: fallback?.apiKey
                         ) { _, _ in }
-                        totalPrompt += pipeline.lastUsage["prompt_tokens"] ?? 0
-                        totalCompletion += pipeline.lastUsage["completion_tokens"] ?? 0
+                        // F1: accumulate usage per model, not as one
+                        // mixed total under the primary model.
+                        for (model, usage) in pipeline.lastUsageByModel {
+                            var entry = totalUsageByModel[model] ?? (0, 0)
+                            entry.prompt += usage["prompt_tokens"] ?? 0
+                            entry.completion += usage["completion_tokens"] ?? 0
+                            totalUsageByModel[model] = entry
+                        }
                         var translation = outcome.results.map(\.translation).joined(separator: "\n")
                         if outcome.failedSegmentIndex != nil {
                             // Part of the paragraph translated: keep
@@ -376,21 +407,29 @@ struct PDFView: View {
             progress = ""
             let firstSource = pages.first?.plainText ?? ""
             let firstResult = translated.first?.plainTranslation ?? ""
-            modelContext.insert(TransformHistory(
-                providerID: profile.id,
-                sourceExcerpt: TextExcerpt.make(firstSource),
-                resultExcerpt: TextExcerpt.make(firstResult),
-                providerName: profile.name,
-                model: profile.model,
-                action: .translate,
-                targetLanguage: target,
-                status: failedParagraphs > 0
-                    ? "partial · \(failedParagraphs) 段失败已保留原文"
-                    : (didDualCheck ? "success · 双模型校对" : (dualModelCheck && dualCheckAttempted ? "success · 双模型校对未生效" : "success")),
-                promptTokens: totalPrompt,
-                completionTokens: totalCompletion,
-                totalTokens: totalPrompt + totalCompletion
-            ))
+            // F1: one history row per model that actually translated —
+            // booking the mixed total under the primary model priced
+            // Qwen-MT fallback tokens at DeepSeek rates.
+            let usageModels = totalUsageByModel.isEmpty ? [profile.model] : [profile.model] + totalUsageByModel.keys.filter { $0 != profile.model }.sorted()
+            for model in usageModels {
+                let totals = totalUsageByModel[model] ?? (0, 0)
+                let isFallback = model != profile.model
+                modelContext.insert(TransformHistory(
+                    providerID: isFallback ? (fallback?.profile.id ?? profile.id) : profile.id,
+                    sourceExcerpt: TextExcerpt.make(firstSource),
+                    resultExcerpt: TextExcerpt.make(firstResult),
+                    providerName: isFallback ? (fallback?.profile.name ?? profile.name) : profile.name,
+                    model: model,
+                    action: .translate,
+                    targetLanguage: target,
+                    status: failedParagraphs > 0
+                        ? "partial · \(failedParagraphs) 段失败已保留原文"
+                        : (didDualCheck ? "success · 双模型校对" : (dualModelCheck && dualCheckAttempted ? "success · 双模型校对未生效" : "success")),
+                    promptTokens: totals.prompt,
+                    completionTokens: totals.completion,
+                    totalTokens: totals.prompt + totals.completion
+                ))
+            }
             try? modelContext.save()
         } catch {
             // Cancellation (the 取消 button) keeps the partial
@@ -398,7 +437,11 @@ struct PDFView: View {
             if error is CancellationError {
                 progress = ""
                 if !translated.isEmpty {
-                    partialNote = "已取消，已译的部分已保存，可随时继续翻译。"
+                    // E4: keep the untranslated-pages note visible —
+                    // the export still contains those pages as
+                    // original text.
+                    let missingCount = pages.count - translated.count
+                    partialNote = "已取消，已译的部分已保存，可随时继续翻译。" + (missingCount > 0 ? "导出的 PDF 还有 \(missingCount) 页未翻译（保留原文）。" : "")
                 }
                 return
             }

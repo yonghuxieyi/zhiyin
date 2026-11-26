@@ -1,6 +1,7 @@
 import RunseCore
 import SwiftData
 import SwiftUI
+import UIKit
 
 /// Face-to-face mode (清单 9): two people, one phone. The phone lies
 /// between them; the top half is rotated 180° so the person across can
@@ -86,7 +87,7 @@ struct FaceToFaceView: View {
                         Label(listeningSide == .them ? "正在听…" : "对方说话", systemImage: "mic")
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(isWorking && listeningSide != .them)
+                    .disabled((isWorking || listeningSide != nil) && listeningSide != .them)
                 }
                 .padding()
             }
@@ -124,7 +125,7 @@ struct FaceToFaceView: View {
                             Label(listeningSide == .me ? "正在听…" : "我说", systemImage: "mic")
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(isWorking && listeningSide != .me)
+                        .disabled((isWorking || listeningSide != nil) && listeningSide != .me)
                         Button {
                             Task { await replayLatest() }
                         } label: {
@@ -137,6 +138,16 @@ struct FaceToFaceView: View {
                         Text(errorMessage)
                             .font(.footnote)
                             .foregroundStyle(.red)
+                        // N7: denied mic permission gets a one-tap way
+                        // to Settings instead of just a message.
+                        if errorMessage.hasPrefix("麦克风权限未开启") {
+                            Button("去设置打开麦克风权限") {
+                                if let url = URL(string: UIApplication.openSettingsURLString) {
+                                    UIApplication.shared.open(url)
+                                }
+                            }
+                            .font(.footnote)
+                        }
                     }
                 }
                 .padding()
@@ -163,6 +174,13 @@ struct FaceToFaceView: View {
             await stopListening()
             return
         }
+        // N8: switching sides while the other side is listening
+        // would open a second recorder + ASR client (the other
+        // button stays enabled because isWorking is false while
+        // listening). Stop the current side first.
+        if listeningSide != nil, listeningSide != side {
+            await stopListening()
+        }
         guard let config else {
             errorMessage = "语音未配置。"
             return
@@ -171,6 +189,9 @@ struct FaceToFaceView: View {
         liveTranscript = ""
         listeningSide = side
         do {
+            // N7: check the mic before opening the ASR session — a
+            // denied mic must not burn a billable ASR start first.
+            try await VoiceRecorder.requireMicrophonePermission()
             let client = VolcanoASRClient(config: config)
             asrClient = client
             let stream = try await client.start()
@@ -179,7 +200,7 @@ struct FaceToFaceView: View {
                     liveTranscript = text
                 }
             }
-            let audioStream = try recorder.start()
+            let audioStream = try await recorder.start()
             audioFeedTask = Task {
                 for await chunk in audioStream {
                     try? await client.sendAudio(chunk)
@@ -246,20 +267,28 @@ struct FaceToFaceView: View {
         ) { _, _ in }
         let translation = results.map(\.translation).joined(separator: "\n")
         turns.append(FaceTurn(speaker: side, source: text, translation: translation))
-        let usage = pipeline.lastUsage
-        modelContext.insert(TransformHistory(
-            providerID: profile.id,
-            sourceExcerpt: TextExcerpt.make(text),
-            resultExcerpt: TextExcerpt.make(translation),
-            providerName: profile.name,
-            model: profile.model,
-            action: .translate,
-            targetLanguage: target,
-            status: "success",
-            promptTokens: usage["prompt_tokens"] ?? 0,
-            completionTokens: usage["completion_tokens"] ?? 0,
-            totalTokens: usage["total_tokens"] ?? 0
-        ))
+        // F1: one history row per model that actually translated —
+        // booking the mixed total under the primary model priced
+        // Qwen-MT fallback tokens at DeepSeek rates.
+        let usageByModel = pipeline.lastUsageByModel
+        let models = usageByModel.isEmpty ? [profile.model] : [profile.model] + usageByModel.keys.filter { $0 != profile.model }.sorted()
+        for model in models {
+            let usage = usageByModel[model] ?? [:]
+            let isFallback = model != profile.model
+            modelContext.insert(TransformHistory(
+                providerID: isFallback ? (fallback?.profile.id ?? profile.id) : profile.id,
+                sourceExcerpt: TextExcerpt.make(text),
+                resultExcerpt: TextExcerpt.make(translation),
+                providerName: isFallback ? (fallback?.profile.name ?? profile.name) : profile.name,
+                model: model,
+                action: .translate,
+                targetLanguage: target,
+                status: "success",
+                promptTokens: usage["prompt_tokens"] ?? 0,
+                completionTokens: usage["completion_tokens"] ?? 0,
+                totalTokens: usage["total_tokens"] ?? 0
+            ))
+        }
         try? modelContext.save()
         await speak(translation)
     }

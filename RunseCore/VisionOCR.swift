@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import Vision
 
 /// On-device text recognition for photos and images. Uses Apple's Vision
@@ -29,12 +30,18 @@ public enum VisionTextRecognizer {
 
     /// Recognizes text in an image, returning lines in reading order
     /// (top to bottom, left to right).
-    public static func recognizeText(in image: CGImage) async throws -> [Line] {
+    ///
+    /// N10: `orientation` is how the pixels relate to upright.
+    /// `UIImage.cgImage` is raw pixels — a portrait photo is
+    /// landscape at the pixel level — so callers must pass the
+    /// image's orientation (or Vision reads sideways text). PDF
+    /// thumbnails are already upright, so they use the default.
+    public static func recognizeText(in image: CGImage, orientation: CGImagePropertyOrientation = .up) async throws -> [Line] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["zh-Hans", "en-US"]
         request.usesLanguageCorrection = true
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        let handler = VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:])
         try handler.perform([request])
         guard let observations = request.results, !observations.isEmpty else {
             throw RecognizerError.noTextFound

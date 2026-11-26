@@ -126,45 +126,45 @@ struct GuideStep {
 
     static let steps = [
         GuideStep(
-            title: "Select text",
-            detail: "In Safari, Notes, Mail, or another text app, touch and hold a word, then adjust the selection handles to include the text you want to change.",
+            title: "选中文字",
+            detail: "在 Safari、备忘录、邮件或其他文字 App 里，长按一个词，再拖动选区手柄，选中想改的文字。",
             systemImage: "selection.pin.in.out",
-            example: "Highlight a sentence, paragraph, or message before opening the menu.",
+            example: "打开菜单之前，先选中一句话、一段话或一条消息。",
             demoState: .selection
         ),
         GuideStep(
-            title: "Open the action menu",
+            title: "打开操作菜单",
             detail: "在选择菜单里点「分享」或「更多」。如果没看到智音，打开「更多」启用它，下次就能直接用。",
             systemImage: "square.and.arrow.up",
-            example: "Look for the system share sheet or action list after selecting text.",
+            example: "选中文字后，在系统分享表单或操作列表里找智音。",
             demoState: .actionMenu
         ),
         GuideStep(
-            title: "Pin Runse",
+            title: "固定智音",
             detail: "如果智音在「更多」里被隐藏了，启用它并拖到靠前的位置，下次就能直接看到。",
             systemImage: "pin",
-            example: "You only need to pin Runse once for each app or menu style where you use it.",
+            example: "每个 App 或每种菜单样式只需固定一次智音。",
             demoState: .pinRunse
         ),
         GuideStep(
-            title: "Choose Runse",
+            title: "选择智音",
             detail: "在分享表单或操作列表里点智音。选中的文字会在智音里打开，可用操作都列在里面。",
             systemImage: "sparkles",
-            example: "Runse receives only the selected text and prepares it for transformation.",
+            example: "智音只会收到你选中的文字，并为它准备好操作。",
             demoState: .chooseRunse
         ),
         GuideStep(
-            title: "Refine or translate",
-            detail: "Choose Refine to improve wording, or Translate to convert the text into your default language. Copy the result back where you need it.",
+            title: "润色或翻译",
+            detail: "选「润色」可以改得更通顺，选「翻译」可以译成你的默认语言，再把结果复制回去。",
             systemImage: "text.badge.checkmark",
-            example: "Use Refine for clearer writing. Use Translate when the selected text should change languages.",
+            example: "想让表达更清楚就用润色，想换语言就用翻译。",
             demoState: .actions
         ),
         GuideStep(
-            title: "Adjust defaults",
+            title: "调整默认设置",
             detail: "在设置里改默认翻译语言和语气，或换模型。",
             systemImage: "gearshape",
-            example: "You can reopen this guide later from Settings.",
+            example: "以后也可以在设置里重新打开这份引导。",
             demoState: .settings
         )
     ]
@@ -287,7 +287,7 @@ struct GuideDemoTextView: View {
         HStack(spacing: 10) {
             Image(systemName: "hand.tap")
                 .foregroundStyle(.green)
-            Text("Touch and hold this sample text, then drag the handles to select the part you want Runse to process.")
+            Text("长按这段示例文字，再拖动手柄，选中想让智音处理的部分。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -295,9 +295,9 @@ struct GuideDemoTextView: View {
 
     private var actionMenu: some View {
         HStack(spacing: 8) {
-            demoPill("Copy", systemImage: "doc.on.doc")
-            demoPill("Share", systemImage: "square.and.arrow.up", highlighted: true)
-            demoPill("More", systemImage: "ellipsis")
+            demoPill("拷贝", systemImage: "doc.on.doc")
+            demoPill("分享", systemImage: "square.and.arrow.up", highlighted: true)
+            demoPill("更多", systemImage: "ellipsis")
         }
     }
 
@@ -319,17 +319,17 @@ struct GuideDemoTextView: View {
     private var pinRunse: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                demoPill("More", systemImage: "ellipsis", highlighted: true)
+                demoPill("更多", systemImage: "ellipsis", highlighted: true)
                 Image(systemName: "arrow.right")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                demoPill("Enable Runse", systemImage: "switch.2")
+                demoPill("启用智音", systemImage: "switch.2")
             }
 
             HStack(spacing: 10) {
                 Image(systemName: "line.3.horizontal")
                     .foregroundStyle(.secondary)
-                Text("Drag Runse near the top")
+                Text("把智音拖到靠前的位置")
                     .font(.footnote.weight(.semibold))
                 Spacer()
                 Image(systemName: "pin.fill")
@@ -342,8 +342,8 @@ struct GuideDemoTextView: View {
 
     private var runseActions: some View {
         HStack(spacing: 10) {
-            demoPill("Refine", systemImage: "wand.and.sparkles", highlighted: true)
-            demoPill("Translate", systemImage: "globe", highlighted: true)
+            demoPill("润色", systemImage: "wand.and.sparkles", highlighted: true)
+            demoPill("翻译", systemImage: "globe", highlighted: true)
         }
     }
 
@@ -351,7 +351,7 @@ struct GuideDemoTextView: View {
         HStack(spacing: 10) {
             Image(systemName: "gearshape")
                 .foregroundStyle(.green)
-            Text("Settings keeps the guide available and stores your default translation language.")
+            Text("设置里可以重新打开这份引导，也能改默认翻译语言。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }

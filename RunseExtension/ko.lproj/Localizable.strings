@@ -13,7 +13,7 @@
 "French" = "프랑스어";
 "German" = "독일어";
 "Subscription Required" = "구독 필요";
-"Open the Runse app and subscribe to Runse Pro to refine or translate selected text." = "Runse 앱을 열고 Runse Pro를 구독하면 선택한 텍스트를 다듬거나 번역할 수 있습니다.";
+"Open the Runse app and subscribe to Runse Pro to refine or translate selected text." = "智音 앱을 열고 智音 Pro를 구독하면 선택한 텍스트를 다듬거나 번역할 수 있습니다.";
 "First month free, then ¥12/year." = "첫 달 무료, 이후 연 ¥12.";
 "¥12/year." = "연 ¥12.";
 "Custom instruction" = "사용자 지시";
@@ -24,7 +24,7 @@
 "Copied" = "복사됨";
 "Copy" = "복사";
 "Done" = "완료";
-"Runse" = "Runse";
+"Runse" = "智音";
 "Refine" = "다듬기";
 "Translate" = "번역";
 "Pinyin" = "병음";

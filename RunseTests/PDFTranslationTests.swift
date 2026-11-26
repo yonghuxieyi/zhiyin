@@ -51,6 +51,14 @@ final class PDFTranslationTests: XCTestCase {
         XCTAssertEqual(content.paragraphs.count, 2)
     }
 
+    func testSingleBlankLineSplitsParagraph() {
+        // E2: one blank line means pitch 28 (2 x 14) but a gap of
+        // only 14 (1 x 14). The old `gap > 1.5 x height` test never
+        // fired on this, so paragraphs ran together.
+        let content = page(lines: [line("上一段没写完", y: 700), line("下一段另起", y: 672)])
+        XCTAssertEqual(content.paragraphs.count, 2)
+    }
+
     func testUnknownBoxesFallBackToPunctuationOnly() {
         let content = page(lines: [
             PDFTextLine(text: "第一句。", bounds: .zero),

@@ -26,6 +26,63 @@ final class SegmentationTests: XCTestCase {
         XCTAssertEqual(segments, [text])
     }
 
+    // C1–C4: abbreviations and ellipsis mid-sentence must not split.
+    func testAbbreviationsBeforeCapitalsDoNotSplit() {
+        XCTAssertEqual(
+            TextSegmenter.splitSentences("The U.S. Government announced new rules."),
+            ["The U.S. Government announced new rules."]
+        )
+        XCTAssertEqual(
+            TextSegmenter.splitSentences("He arrived at 9 a.m. Eastern Time."),
+            ["He arrived at 9 a.m. Eastern Time."]
+        )
+        XCTAssertEqual(
+            TextSegmenter.splitSentences("The meeting is at 3 p.m. Monday."),
+            ["The meeting is at 3 p.m. Monday."]
+        )
+    }
+
+    func testLatinAbbreviationsDoNotSplit() {
+        XCTAssertEqual(
+            TextSegmenter.splitSentences("Smith vs. Tyson was the main event."),
+            ["Smith vs. Tyson was the main event."]
+        )
+        XCTAssertEqual(
+            TextSegmenter.splitSentences("Bring fruit, e.g. Fuji apples."),
+            ["Bring fruit, e.g. Fuji apples."]
+        )
+    }
+
+    func testDegreesAndInitialsDoNotSplit() {
+        XCTAssertEqual(
+            TextSegmenter.splitSentences("She earned her Ph.D. in physics."),
+            ["She earned her Ph.D. in physics."]
+        )
+        XCTAssertEqual(
+            TextSegmenter.splitSentences("J. Smith arrived early."),
+            ["J. Smith arrived early."]
+        )
+    }
+
+    func testEllipsisDoesNotSplit() {
+        XCTAssertEqual(
+            TextSegmenter.splitSentences("He paused... then continued."),
+            ["He paused... then continued."]
+        )
+        XCTAssertEqual(
+            TextSegmenter.splitSentences("Wait... what happened?"),
+            ["Wait... what happened?"]
+        )
+    }
+
+    func testAmPmStillSplitsAtRealSentenceEnd() {
+        // The guard above must not swallow a genuine sentence end.
+        XCTAssertEqual(
+            TextSegmenter.splitSentences("Mr. Smith arrived at 9 a.m. He was early."),
+            ["Mr. Smith arrived at 9 a.m.", " He was early."]
+        )
+    }
+
     func testEmptyTextProducesNoSegments() {
         XCTAssertEqual(TextSegmenter.segments(for: "   \n  "), [])
     }

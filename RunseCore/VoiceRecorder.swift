@@ -9,11 +9,17 @@ public final class VoiceRecorder {
     public enum RecorderError: Error, LocalizedError {
         case noInputNode
         case cannotStart(Error)
+        /// N7: the mic permission was denied (or the user declined
+        /// the prompt). Recording without it only produces silence,
+        /// which used to surface as the misleading "没有识别到说话
+        /// 内容" — as if the network or the service had failed.
+        case micPermissionDenied
 
         public var errorDescription: String? {
             switch self {
             case .noInputNode: "No microphone input is available."
             case .cannotStart(let error): "Could not start recording: \(error.localizedDescription)"
+            case .micPermissionDenied: "麦克风权限未开启：请在“设置 → 隐私与安全性 → 麦克风”里打开智音的权限，再重新开始。"
             }
         }
     }
@@ -33,9 +39,29 @@ public final class VoiceRecorder {
         stop()
     }
 
+    /// N7: checks the mic permission before recording starts.
+    /// `.granted` proceeds; `.undetermined` asks once; `.denied`
+    /// throws `micPermissionDenied` instead of recording silence.
+    /// All three callers (voice, face-to-face, interpretation) go
+    /// through `start()`, so one gate covers them.
+    public static func requireMicrophonePermission() async throws {
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted:
+            return
+        case .denied:
+            throw RecorderError.micPermissionDenied
+        case .undetermined:
+            let granted = await AVAudioApplication.requestRecordPermission()
+            guard granted else { throw RecorderError.micPermissionDenied }
+        @unknown default:
+            return
+        }
+    }
+
     /// Starts the audio session and the tap. Returns a stream of PCM
     /// chunks (16 kHz, mono, 16-bit, ~100 ms each). Call `stop` to end it.
-    public func start() throws -> AsyncStream<Data> {
+    public func start() async throws -> AsyncStream<Data> {
+        try await Self.requireMicrophonePermission()
         let session = AVAudioSession.sharedInstance()
         do {
             // M6: .allowBluetooth routes the mic through the HFP

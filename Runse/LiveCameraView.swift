@@ -1,7 +1,9 @@
 import AVFoundation
+import ImageIO
 import RunseCore
 import SwiftData
 import SwiftUI
+import UIKit
 
 /// Live camera translation (清单 10): point the camera at English text
 /// and the Chinese translation appears on screen — no need to take a
@@ -17,6 +19,10 @@ struct LiveCameraView: View {
     @State private var translation = ""
     @State private var lastTranslatedText = ""
     @State private var isTranslating = false
+    /// N9: text that arrived while a translation was running. The
+    /// old code dropped it, and a static camera never re-triggered,
+    /// so the screen kept the old translation forever.
+    @State private var pendingText = ""
     @State private var errorMessage: String?
 
     private let pipeline = TranslationPipeline()
@@ -71,11 +77,16 @@ struct LiveCameraView: View {
     @MainActor
     private func translateIfNeeded(_ text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != lastTranslatedText, !isTranslating else { return }
+        guard !trimmed.isEmpty, trimmed != lastTranslatedText else { return }
+        // N9: park text that arrives mid-translation instead of
+        // dropping it; it is picked up below when this run finishes.
+        if isTranslating {
+            pendingText = trimmed
+            return
+        }
         lastTranslatedText = trimmed
         isTranslating = true
         errorMessage = nil
-        defer { isTranslating = false }
         do {
             let request = try await TranslationRequestResolver.resolve(profiles: profiles, templates: templates)
             let profile = request.profile
@@ -98,6 +109,14 @@ struct LiveCameraView: View {
             translation = results.map(\.translation).joined(separator: "\n")
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+        isTranslating = false
+        // N9: translate anything that arrived while this run was
+        // going, so a static camera still catches up.
+        if !pendingText.isEmpty, pendingText != lastTranslatedText {
+            let next = pendingText
+            pendingText = ""
+            await translateIfNeeded(next)
         }
     }
 }
@@ -145,13 +164,13 @@ final class LiveCameraController: NSObject, ObservableObject {
         session.startRunning()
     }
 
-    private func ocr(_ cgImage: CGImage) {
+    private func ocr(_ cgImage: CGImage, orientation: CGImagePropertyOrientation) {
         guard !ocrInFlight else { return }
         ocrInFlight = true
         Task { [weak self] in
             guard let self else { return }
             defer { Task { @MainActor in self.ocrInFlight = false } }
-            let lines = try? await VisionTextRecognizer.recognizeText(in: cgImage)
+            let lines = try? await VisionTextRecognizer.recognizeText(in: cgImage, orientation: orientation)
             let text = lines.map { VisionTextRecognizer.plainText(from: $0) } ?? ""
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             await MainActor.run {
@@ -193,8 +212,26 @@ extension LiveCameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         guard let cgImage = liveCameraCIContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+        // N10: the back camera's sensor is landscape — in portrait
+        // the pixels are sideways. Pass the orientation so Vision
+        // reads the text upright.
+        let orientation = Self.cgOrientation(from: UIDevice.current.orientation)
         Task { @MainActor in
-            self.ocr(cgImage)
+            self.ocr(cgImage, orientation: orientation)
+        }
+    }
+
+    /// N10: device orientation → the orientation of the back-camera
+    /// pixel buffer relative to upright (portrait frames need a 90°
+    /// clockwise correction, i.e. `.right`). Nonisolated: called
+    /// from the nonisolated capture-output delegate.
+    private nonisolated static func cgOrientation(from deviceOrientation: UIDeviceOrientation) -> CGImagePropertyOrientation {
+        switch deviceOrientation {
+        case .portrait: return .right
+        case .portraitUpsideDown: return .left
+        case .landscapeLeft: return .down
+        case .landscapeRight: return .up
+        default: return .right
         }
     }
 }

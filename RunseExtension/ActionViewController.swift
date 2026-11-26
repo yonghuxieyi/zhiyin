@@ -9,19 +9,46 @@ final class ActionViewController: UIViewController {
         super.viewDidLoad()
         Task { @MainActor in
             let selectedText = await loadText()
-            let container = (try? Bootstrap.modelContainer()) ?? (try! Bootstrap.modelContainer(inMemory: true))
-            try? Bootstrap.seedDefaultsIfNeeded(context: container.mainContext)
-            let root = ExtensionRootView(selectedText: selectedText) {
-                self.extensionContext?.completeRequest(returningItems: nil)
+            // N13: the old code silently fell back to a throwaway
+            // in-memory database when the shared container would not
+            // open (and the fallback itself was a `try!` crash risk),
+            // so the user "saved" history that vanished with the
+            // extension. Show an error instead of pretending success.
+            do {
+                let container = try Bootstrap.modelContainer()
+                try? Bootstrap.seedDefaultsIfNeeded(context: container.mainContext)
+                showRoot(container: container, selectedText: selectedText)
+            } catch {
+                showDatabaseError(error)
             }
-            .modelContainer(container)
-            let hosting = UIHostingController(rootView: root)
-            addChild(hosting)
-            hosting.view.frame = view.bounds
-            hosting.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            view.addSubview(hosting.view)
-            hosting.didMove(toParent: self)
         }
+    }
+
+    private func showRoot(container: ModelContainer, selectedText: String) {
+        let root = ExtensionRootView(selectedText: selectedText) {
+            self.extensionContext?.completeRequest(returningItems: nil)
+        }
+        .modelContainer(container)
+        let hosting = UIHostingController(rootView: root)
+        addChild(hosting)
+        hosting.view.frame = view.bounds
+        hosting.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(hosting.view)
+        hosting.didMove(toParent: self)
+    }
+
+    private func showDatabaseError(_ error: Error) {
+        let label = UILabel()
+        label.text = "数据库打不开，请先打开主 App 一次再试。\n\(error.localizedDescription)"
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            label.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
     }
 
     private func loadText() async -> String {

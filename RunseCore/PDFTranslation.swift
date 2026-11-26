@@ -93,7 +93,8 @@ public struct PDFPageContent: Sendable {
     /// - the previous line ends with sentence-final punctuation
     ///   (。！？!?…；;) AND the vertical gap to the next line is
     ///   wider than normal line spacing (> 0.4 × line height), or
-    /// - the vertical gap is blank-line sized (> 1.5 × line height).
+    /// - the line pitch (distance between the two lines) is
+    ///   blank-line sized (> 1.5 × line height).
     /// When either box is unknown (`.zero`) only the punctuation rule
     /// applies, so a wrapped sentence is never split by a missing box.
     public var paragraphs: [PDFParagraph] {
@@ -134,10 +135,17 @@ public struct PDFPageContent: Sendable {
             return endsSentence
         }
         // Gap between the bottom of the upper line and the top of the
-        // lower line (PDF coords grow upwards).
+        // lower line, and the pitch between the two lines (PDF coords
+        // grow upwards).
         let gap = prevBox.minY - nextBox.maxY
+        let pitch = prevBox.minY - nextBox.minY
         let lineHeight = prevBox.height
-        if gap > lineHeight * 1.5 { return true }
+        // E2: the blank-line test must use the pitch, not the gap. A
+        // single blank line leaves a gap of only ~1.0 x line height,
+        // so `gap > 1.5 x height` almost never fired and paragraphs
+        // ran together. Normal pitch is ~1.0-1.2 x height; one blank
+        // line pushes it past 1.5 x.
+        if pitch > lineHeight * 1.5 { return true }
         if endsSentence && gap > lineHeight * 0.4 { return true }
         return false
     }

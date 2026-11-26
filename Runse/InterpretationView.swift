@@ -200,6 +200,16 @@ struct InterpretationView: View {
                 Text(errorMessage)
                     .font(.footnote)
                     .foregroundStyle(.red)
+                // N7: denied mic permission gets a one-tap way to
+                // Settings instead of just a message.
+                if errorMessage.hasPrefix("麦克风权限未开启") {
+                    Button("去设置打开麦克风权限") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    }
+                    .font(.footnote)
+                }
             }
         }
     }

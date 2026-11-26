@@ -64,6 +64,10 @@ public actor LiveInterpretClient {
     private var sessionStarted = false
     private var sessionFailure: String?
     private var sessionFinished = false
+    /// D1: set by cancel() so a start() that is still waiting for
+    /// SessionStarted can end promptly instead of returning a stream
+    /// for a socket that was just cancelled.
+    private var stopped = false
 
     public init(config: VolcanoVoiceConfig, sessionConfig: ASTSessionConfig, session: URLSession = .shared) {
         self.config = config
@@ -83,6 +87,13 @@ public actor LiveInterpretClient {
     /// Throws on handshake failure, session failure, or a 10s timeout.
     public func start() async throws -> AsyncStream<Event> {
         guard config.isComplete else { throw ClientError.notConfigured }
+        // D1: a reused client must not carry the previous session's
+        // state — a stale sessionStarted=true would make this call
+        // return before the new session actually started.
+        stopped = false
+        sessionStarted = false
+        sessionFailure = nil
+        sessionFinished = false
         var request = URLRequest(url: Self.endpoint)
         request.setValue(config.appID, forHTTPHeaderField: "X-Api-App-Key")
         request.setValue(config.accessToken, forHTTPHeaderField: "X-Api-Access-Key")
@@ -106,6 +117,14 @@ public actor LiveInterpretClient {
         }
         let deadline = Date().addingTimeInterval(10)
         while !sessionStarted {
+            // D1: stop() during connection establishment must end
+            // this wait instead of letting start() return a stream
+            // for a socket that was just cancelled (the session
+            // would "revive" after the user stopped it).
+            if stopped {
+                await cancel()
+                throw ClientError.connectionFailed("同传已停止")
+            }
             if let failure = sessionFailure {
                 await cancel()
                 throw ClientError.sessionFailed(failure)
@@ -115,6 +134,13 @@ public actor LiveInterpretClient {
                 throw ClientError.timedOut
             }
             try await Task.sleep(for: .milliseconds(50))
+        }
+        // D1: the loop above exits when the session starts — but a
+        // stop() that landed in the same instant must still win over
+        // returning a stream for a cancelled socket.
+        if stopped {
+            await cancel()
+            throw ClientError.connectionFailed("同传已停止")
         }
         return stream
     }
@@ -146,6 +172,10 @@ public actor LiveInterpretClient {
     }
 
     public func cancel() async {
+        stopped = true
+        sessionStarted = false
+        sessionFailure = nil
+        sessionFinished = false
         eventContinuation?.finish()
         eventContinuation = nil
         receiveTask?.cancel()
@@ -156,12 +186,16 @@ public actor LiveInterpretClient {
 
     private func receiveLoop() async {
         guard let task else { return }
+        // D1: hold this generation's continuation. The trailing
+        // finish below must not finish a NEWER stream's continuation
+        // if cancel() + a fresh start() already replaced it.
+        let continuation = eventContinuation
         while true {
             do {
                 let message = try await task.receive()
                 switch message {
                 case .data(let data):
-                    handleResponseData(data)
+                    handleResponseData(data, continuation: continuation)
                 case .string:
                     // The AST protocol never sends text frames.
                     continue
@@ -172,61 +206,63 @@ public actor LiveInterpretClient {
                 break
             }
         }
-        eventContinuation?.finish()
-        eventContinuation = nil
+        continuation?.finish()
     }
 
-    private func handleResponseData(_ data: Data) {
+    private func handleResponseData(_ data: Data, continuation: AsyncStream<Event>.Continuation?) {
+        // D1: a message that arrived just as cancel() ran must not
+        // set flags or yield events into a dead (or newer) session.
+        guard !stopped else { return }
         guard let response = ASTResponse.decode(data) else { return }
         if response.isError, let code = response.statusCode {
             let detail = response.message.map { "\($0) (\(code))" } ?? "错误码 \(code)"
             sessionFailure = detail
-            eventContinuation?.yield(.failed(detail))
+            continuation?.yield(.failed(detail))
             return
         }
         switch response.event {
         case .sessionStarted:
             sessionStarted = true
-            eventContinuation?.yield(.sessionStarted)
+            continuation?.yield(.sessionStarted)
         case .sourceSubtitleStart:
-            eventContinuation?.yield(.sourceStarted(speakerChanged: response.speakerChanged))
+            continuation?.yield(.sourceStarted(speakerChanged: response.speakerChanged))
         case .sourceSubtitleResponse:
-            if let text = response.text { eventContinuation?.yield(.sourcePartial(text: text)) }
+            if let text = response.text { continuation?.yield(.sourcePartial(text: text)) }
         case .sourceSubtitleEnd:
-            eventContinuation?.yield(.sourceFinal(
+            continuation?.yield(.sourceFinal(
                 text: response.text ?? "",
                 startMs: response.startTime ?? 0,
                 endMs: response.endTime ?? 0,
                 speakerChanged: response.speakerChanged
             ))
         case .translationSubtitleStart:
-            eventContinuation?.yield(.translationStarted(speakerChanged: response.speakerChanged))
+            continuation?.yield(.translationStarted(speakerChanged: response.speakerChanged))
         case .translationSubtitleResponse:
-            if let text = response.text { eventContinuation?.yield(.translationPartial(text: text)) }
+            if let text = response.text { continuation?.yield(.translationPartial(text: text)) }
         case .translationSubtitleEnd:
-            eventContinuation?.yield(.translationFinal(
+            continuation?.yield(.translationFinal(
                 text: response.text ?? "",
                 startMs: response.startTime ?? 0,
                 endMs: response.endTime ?? 0,
                 speakerChanged: response.speakerChanged
             ))
         case .ttsResponse:
-            if let audio = response.data { eventContinuation?.yield(.ttsAudio(audio)) }
+            if let audio = response.data { continuation?.yield(.ttsAudio(audio)) }
         case .ttsSentenceStart:
-            eventContinuation?.yield(.ttsSentenceStarted)
+            continuation?.yield(.ttsSentenceStarted)
         case .ttsSentenceEnd:
-            eventContinuation?.yield(.ttsSentenceEnded)
+            continuation?.yield(.ttsSentenceEnded)
         case .audioMuted:
-            eventContinuation?.yield(.muted(durationMs: response.mutedDurationMs ?? 0))
+            continuation?.yield(.muted(durationMs: response.mutedDurationMs ?? 0))
         case .usageResponse:
-            if let billing = response.billing { eventContinuation?.yield(.usage(billing)) }
+            if let billing = response.billing { continuation?.yield(.usage(billing)) }
         case .sessionFinished:
             sessionFinished = true
-            eventContinuation?.yield(.sessionFinished)
+            continuation?.yield(.sessionFinished)
         case .sessionFailed:
             let detail = response.message ?? "会话失败"
             sessionFailure = detail
-            eventContinuation?.yield(.failed(detail))
+            continuation?.yield(.failed(detail))
         default:
             // Start/End markers carry no text of their own.
             break

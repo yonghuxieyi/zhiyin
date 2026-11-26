@@ -85,10 +85,14 @@ public enum TextSegmenter {
     ///
     /// A "." is NOT a sentence end when it is part of a decimal
     /// ("3.14"), a version number ("1.2.3"), a domain or URL
-    /// ("example.com", "www.foo.bar"), or a title abbreviation
-    /// ("Mr.", "Dr."). Other abbreviations ("a.m.", "etc.", "U.S.")
-    /// do end a sentence when followed by a space and a capital
-    /// letter — "at 9 a.m. He was early." splits after "a.m.".
+    /// ("example.com", "www.foo.bar"), an ellipsis ("..."), a
+    /// single-letter initial ("J. Smith"), or an abbreviation that
+    /// almost always sits mid-sentence ("U.S. Government", "vs.
+    /// Tyson", "e.g. Fuji", "Ph.D. in physics"). "a.m." / "p.m." /
+    /// "etc." do end a sentence when followed by a space and a
+    /// capital letter — "at 9 a.m. He was early." splits after
+    /// "a.m." — unless the next word continues the time ("9 a.m.
+    /// Eastern Time" stays together).
     public static func splitSentences(_ paragraph: String) -> [String] {
         let terminators: Set<Character> = ["。", "！", "？", "；", ".", "!", "?", ";"]
         let closingQuotes: Set<Character> = ["”", "’", "\"", "』", "」"]
@@ -131,21 +135,39 @@ public enum TextSegmenter {
         // Domain / URL / abbreviation mid-word: a letter follows the
         // dot with no space ("example.com", "U.S.A").
         if let next, next.isLetter { return false }
+        // C4: ellipsis — a dot next to another dot belongs to "..."
+        // ("He paused... then continued.") and never ends a sentence
+        // on its own.
+        if prev == "." || next == "." { return false }
+        // C3: single-letter initial ("J. Smith"): one letter with no
+        // dot before it is a name initial, not a sentence end.
+        if isSingleInitial(characters, endingAt: index) { return false }
         // Known abbreviation immediately before the dot ("Mr.", "e.g.",
         // "U.S.", "a.m."): look back at the word ending here.
-        // Titles ("Mr.", "Dr.") never end a sentence, so they never
-        // split. Other abbreviations ("a.m.", "etc.", "U.S.") CAN end
-        // one: "at 9 a.m. He was early." splits after "a.m.", while
-        // "Mr. Smith" does not split after "Mr.". The tell is what
-        // follows: a space and a capital letter (or the end of the
-        // text) means the abbreviation closed the sentence.
         if let abbreviation = abbreviationEndingAt(characters, endingAt: index) {
+            // C1/C2: these abbreviations essentially never end a
+            // sentence — "U.S. Government", "vs. Tyson", "e.g. Fuji",
+            // "Ph.D. in physics" are all mid-sentence, and splitting
+            // after them produced fragments that mistranslate.
+            if Self.neverSplitAbbreviations.contains(abbreviation) { return false }
+            // Titles ("Mr.", "Dr.") never end a sentence, so they never
+            // split.
             if Self.titleAbbreviations.contains(abbreviation) { return false }
+            // "a.m." / "p.m." / "etc." CAN end one: "at 9 a.m. He was
+            // early." splits after "a.m.", while "Mr. Smith" does not
+            // split after "Mr.". The tell is what follows: a space and
+            // a capital letter (or the end of the text) means the
+            // abbreviation closed the sentence — unless the next word
+            // continues the time ("9 a.m. Eastern Time", "3 p.m.
+            // Monday" stay together).
             var nextIndex = index + 1
             while nextIndex < characters.count, characters[nextIndex] == " " {
                 nextIndex += 1
             }
             if nextIndex >= characters.count { return true }
+            if (abbreviation == "am" || abbreviation == "pm"),
+               let nextWord = wordStartingAt(characters, from: nextIndex),
+               Self.timeContinuationWords.contains(nextWord) { return false }
             return characters[nextIndex].isUppercase
         }
         return true
@@ -157,6 +179,44 @@ public enum TextSegmenter {
         "mr", "mrs", "ms", "dr", "st", "prof", "jr", "sr", "no"
     ]
 
+    /// Abbreviations that essentially never end a sentence: they sit
+    /// mid-sentence far more often than at the end ("U.S.
+    /// Government", "X vs. Tyson", "e.g. Fuji", "a Ph.D. in
+    /// physics"). Missing a split here only makes a segment longer;
+    /// a wrong split fragments the sentence and mistranslates it.
+    private static let neverSplitAbbreviations: Set<String> = [
+        "vs", "eg", "ie", "us", "usa", "uk", "phd", "md", "edd", "dphil"
+    ]
+
+    /// Words that continue a time expression after "a.m." / "p.m."
+    /// instead of starting a new sentence ("9 a.m. Eastern Time",
+    /// "3 p.m. Monday").
+    private static let timeContinuationWords: Set<String> = [
+        "eastern", "pacific", "central", "mountain",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+        "january", "february", "march", "april", "may", "june", "july",
+        "august", "september", "october", "november", "december",
+        "today", "tomorrow", "yesterday"
+    ]
+
+    /// True when the word ending at the "." at `dotIndex` is a single
+    /// letter standing on its own — a name initial ("J. Smith"). A
+    /// letter preceded by a dot ("a.m.", "U.S.") is part of a dotted
+    /// abbreviation, not an initial.
+    private static func isSingleInitial(_ characters: [Character], endingAt dotIndex: Int) -> Bool {
+        guard dotIndex >= 1, characters[dotIndex - 1].isLetter else { return false }
+        if dotIndex >= 2, characters[dotIndex - 2].isLetter || characters[dotIndex - 2] == "." { return false }
+        return true
+    }
+
+    /// The word starting at `start` (letters only), lowercased.
+    private static func wordStartingAt(_ characters: [Character], from start: Int) -> String? {
+        var end = start
+        while end < characters.count, characters[end].isLetter { end += 1 }
+        guard end > start else { return nil }
+        return String(characters[start..<end]).lowercased()
+    }
+
     /// The known abbreviation ending at the "." at `dotIndex`, if any
     /// (compared case-insensitively, dots stripped). Returns nil when
     /// the word is not a known abbreviation.
@@ -164,7 +224,7 @@ public enum TextSegmenter {
         let abbreviations: Set<String> = [
             "mr", "mrs", "ms", "dr", "st", "vs", "etc", "eg", "ie",
             "am", "pm", "us", "usa", "uk", "jr", "sr", "prof", "no",
-            "approx", "fig", "eq", "al"
+            "approx", "fig", "eq", "al", "phd", "md", "edd", "dphil"
         ]
         var start = dotIndex - 1
         while start >= 0, characters[start].isLetter || characters[start] == "." {

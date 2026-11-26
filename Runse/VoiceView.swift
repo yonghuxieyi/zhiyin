@@ -1,6 +1,7 @@
 import RunseCore
 import SwiftData
 import SwiftUI
+import UIKit
 
 /// Voice translation: speak, the app recognizes what was said (streaming
 /// ASR), translates it, and reads the translation aloud (streaming TTS).
@@ -166,6 +167,16 @@ struct VoiceView: View {
                     if let errorMessage {
                         Text(errorMessage)
                             .foregroundStyle(.red)
+                        // N7: denied mic permission gets a one-tap way
+                        // to Settings instead of just a message.
+                        if errorMessage.hasPrefix("麦克风权限未开启") {
+                            Button("去设置打开麦克风权限") {
+                                if let url = URL(string: UIApplication.openSettingsURLString) {
+                                    UIApplication.shared.open(url)
+                                }
+                            }
+                            .font(.footnote)
+                        }
                     }
 
                     Section("语音配置") {
@@ -232,6 +243,9 @@ struct VoiceView: View {
         lastAudio = nil
         phase = .listening
         do {
+            // N7: check the mic before opening the ASR session — a
+            // denied mic must not burn a billable ASR start first.
+            try await VoiceRecorder.requireMicrophonePermission()
             let client = VolcanoASRClient(config: config)
             asrClient = client
             let transcriptStream = try await client.start()
@@ -240,7 +254,7 @@ struct VoiceView: View {
                     transcript = text
                 }
             }
-            let audioStream = try recorder.start()
+            let audioStream = try await recorder.start()
             audioFeedTask = Task {
                 for await chunk in audioStream {
                     try? await client.sendAudio(chunk)
@@ -313,20 +327,28 @@ struct VoiceView: View {
             translation = partials.joined(separator: "\n")
         }
         translation = results.map(\.translation).joined(separator: "\n")
-        let usage = pipeline.lastUsage
-        modelContext.insert(TransformHistory(
-            providerID: profile.id,
-            sourceExcerpt: TextExcerpt.make(text),
-            resultExcerpt: TextExcerpt.make(translation),
-            providerName: profile.name,
-            model: profile.model,
-            action: .translate,
-            targetLanguage: target,
-            status: pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success",
-            promptTokens: usage["prompt_tokens"] ?? 0,
-            completionTokens: usage["completion_tokens"] ?? 0,
-            totalTokens: usage["total_tokens"] ?? 0
-        ))
+        // F1: one history row per model that actually translated —
+        // booking the mixed total under the primary model priced
+        // Qwen-MT fallback tokens at DeepSeek rates.
+        let usageByModel = pipeline.lastUsageByModel
+        let models = usageByModel.isEmpty ? [profile.model] : [profile.model] + usageByModel.keys.filter { $0 != profile.model }.sorted()
+        for model in models {
+            let usage = usageByModel[model] ?? [:]
+            let isFallback = model != profile.model
+            modelContext.insert(TransformHistory(
+                providerID: isFallback ? (fallback?.profile.id ?? profile.id) : profile.id,
+                sourceExcerpt: TextExcerpt.make(text),
+                resultExcerpt: TextExcerpt.make(translation),
+                providerName: isFallback ? (fallback?.profile.name ?? profile.name) : profile.name,
+                model: model,
+                action: .translate,
+                targetLanguage: target,
+                status: pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success",
+                promptTokens: usage["prompt_tokens"] ?? 0,
+                completionTokens: usage["completion_tokens"] ?? 0,
+                totalTokens: usage["total_tokens"] ?? 0
+            ))
+        }
         try? modelContext.save()
         // Read the translation aloud, streaming (清单 12): audio starts
         // ~0.5 s in instead of ~9 s for a finished MP3. If streaming

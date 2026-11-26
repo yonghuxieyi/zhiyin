@@ -234,11 +234,18 @@ struct MyVoiceView: View {
         isWorking = true
         errorMessage = nil
         defer { isWorking = false }
+        // N11: without a DashScope Key the server-side voice cannot
+        // be deleted — clearing the local record anyway would report
+        // success while the voice stays alive in the DashScope
+        // account (and eats one of its 10 voice slots), with the ID
+        // forgotten so it can never be deleted later. Refuse instead.
+        guard let apiKey = await DashScopeStore.loadKey() else {
+            errorMessage = "没有 DashScope Key，删不掉阿里服务端的音色，本地记录也没删。请先在设置里填上 DashScope Key 再删除。"
+            return
+        }
         do {
-            if let apiKey = await DashScopeStore.loadKey() {
-                let workspaceID = await DashScopeStore.loadWorkspaceID()
-                try await QwenVoiceClone.deleteVoice(apiKey: apiKey, workspaceID: workspaceID, voiceID: voiceID)
-            }
+            let workspaceID = await DashScopeStore.loadWorkspaceID()
+            try await QwenVoiceClone.deleteVoice(apiKey: apiKey, workspaceID: workspaceID, voiceID: voiceID)
             try await QwenVoiceStore.clearVoiceID()
             self.voiceID = nil
             var settings = VoiceSettings()
