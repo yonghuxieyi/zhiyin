@@ -140,7 +140,7 @@ struct TranslateView: View {
                 GlossaryEditorView(candidates: extractedCandidates)
             }
             .sheet(isPresented: $showingFavorites) {
-                NavigationStack { HistoryView() }
+                NavigationStack { FavoritesView() }
             }
             .sheet(isPresented: $showingSettings) {
                 SettingsView()
