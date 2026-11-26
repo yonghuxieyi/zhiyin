@@ -440,7 +440,7 @@ public final class InterpretationEngine: ObservableObject {
         audioFeedTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let stream = try await self.recorder.start()
+                let stream = try await self.startRecorderStream()
                 for await chunk in stream {
                     await self.handleAudioChunk(chunk)
                 }
@@ -448,6 +448,14 @@ public final class InterpretationEngine: ObservableObject {
                 await self.handleAudioError(error)
             }
         }
+    }
+
+    /// N7 跟进修：VoiceRecorder.start() 改成 async 后（麦克风权限
+    /// 门控），在 feed Task 里直接 await self.recorder.start() 会把
+    /// 主线程隔离的 recorder 发给非隔离方法，Swift 6 报 data race。
+    /// 经这个 @MainActor  helper 启动，recorder 不离开主线程。
+    private func startRecorderStream() async throws -> AsyncStream<Data> {
+        try await recorder.start()
     }
 
     private func handleAudioChunk(_ chunk: Data) async {
