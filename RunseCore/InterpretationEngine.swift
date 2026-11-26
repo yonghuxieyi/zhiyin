@@ -148,13 +148,16 @@ public final class InterpretationEngine: ObservableObject {
     /// N6 backstop: if the engine is dropped without `stop()` (view
     /// dismissed mid-session), at least cancel the background work
     /// and close the live sockets instead of leaking them.
+    /// NOTE: `recorder`/`router` are deliberately NOT touched here:
+    /// Swift 6 forbids a nonisolated deinit from accessing the
+    /// @MainActor engine's non-Sendable stored properties (that was
+    /// the CI failure). Both stop themselves in their own deinit,
+    /// which runs right after this body when the engine releases them.
     deinit {
         retryTask?.cancel()
         audioFeedTask?.cancel()
         fallbackTask?.cancel()
         for task in eventTasks { task.cancel() }
-        recorder.stop()
-        router.stop()
         let forward = forwardClient
         let reverse = reverseClient
         Task { [forward, reverse] in

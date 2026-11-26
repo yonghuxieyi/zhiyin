@@ -46,10 +46,11 @@ public final class EarphoneRouter {
         }
     }
 
+    /// N6 backstop: stopping the engine/nodes here as well as
+    /// removing observers, so dropping the router without `stop()`
+    /// (owning engine dismissed mid-session) cannot leak playback.
     deinit {
-        for observer in observers {
-            NotificationCenter.default.removeObserver(observer)
-        }
+        stop()
     }
 
     public func start() throws {

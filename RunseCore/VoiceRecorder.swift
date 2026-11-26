@@ -24,6 +24,15 @@ public final class VoiceRecorder {
 
     public init() {}
 
+    /// N6 backstop: if the recorder is dropped without `stop()`
+    /// (owning engine dismissed mid-session), remove the tap and
+    /// stop the engine instead of leaking the mic. A plain class's
+    /// own deinit may touch its own members; the @MainActor engine's
+    /// deinit cannot (Swift 6), so the cleanup lives here.
+    deinit {
+        stop()
+    }
+
     /// Starts the audio session and the tap. Returns a stream of PCM
     /// chunks (16 kHz, mono, 16-bit, ~100 ms each). Call `stop` to end it.
     public func start() throws -> AsyncStream<Data> {
