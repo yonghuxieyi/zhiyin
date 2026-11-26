@@ -85,9 +85,10 @@ public enum TextSegmenter {
     ///
     /// A "." is NOT a sentence end when it is part of a decimal
     /// ("3.14"), a version number ("1.2.3"), a domain or URL
-    /// ("example.com", "www.foo.bar"), or a known abbreviation
-    /// ("U.S.", "Mr.", "e.g.", "a.m.") — those would otherwise be
-    /// chopped into nonsense pieces.
+    /// ("example.com", "www.foo.bar"), or a title abbreviation
+    /// ("Mr.", "Dr."). Other abbreviations ("a.m.", "etc.", "U.S.")
+    /// do end a sentence when followed by a space and a capital
+    /// letter — "at 9 a.m. He was early." splits after "a.m.".
     public static func splitSentences(_ paragraph: String) -> [String] {
         let terminators: Set<Character> = ["。", "！", "？", "；", ".", "!", "?", ";"]
         let closingQuotes: Set<Character> = ["”", "’", "\"", "』", "」"]
@@ -132,13 +133,34 @@ public enum TextSegmenter {
         if let next, next.isLetter { return false }
         // Known abbreviation immediately before the dot ("Mr.", "e.g.",
         // "U.S.", "a.m."): look back at the word ending here.
-        if isAbbreviation(characters, endingAt: index) { return false }
+        // Titles ("Mr.", "Dr.") never end a sentence, so they never
+        // split. Other abbreviations ("a.m.", "etc.", "U.S.") CAN end
+        // one: "at 9 a.m. He was early." splits after "a.m.", while
+        // "Mr. Smith" does not split after "Mr.". The tell is what
+        // follows: a space and a capital letter (or the end of the
+        // text) means the abbreviation closed the sentence.
+        if let abbreviation = abbreviationEndingAt(characters, endingAt: index) {
+            if Self.titleAbbreviations.contains(abbreviation) { return false }
+            var nextIndex = index + 1
+            while nextIndex < characters.count, characters[nextIndex] == " " {
+                nextIndex += 1
+            }
+            if nextIndex >= characters.count { return true }
+            return characters[nextIndex].isUppercase
+        }
         return true
     }
 
-    /// True when the word ending at the "." at `dotIndex` is a known
-    /// abbreviation (compared case-insensitively, dots stripped).
-    private static func isAbbreviation(_ characters: [Character], endingAt dotIndex: Int) -> Bool {
+    /// Abbreviations that never end a sentence: titles and honorifics
+    /// are always followed by a name ("Mr. Smith", "Dr. Lee").
+    private static let titleAbbreviations: Set<String> = [
+        "mr", "mrs", "ms", "dr", "st", "prof", "jr", "sr", "no"
+    ]
+
+    /// The known abbreviation ending at the "." at `dotIndex`, if any
+    /// (compared case-insensitively, dots stripped). Returns nil when
+    /// the word is not a known abbreviation.
+    private static func abbreviationEndingAt(_ characters: [Character], endingAt dotIndex: Int) -> String? {
         let abbreviations: Set<String> = [
             "mr", "mrs", "ms", "dr", "st", "vs", "etc", "eg", "ie",
             "am", "pm", "us", "usa", "uk", "jr", "sr", "prof", "no",
@@ -151,7 +173,7 @@ public enum TextSegmenter {
         let word = String(characters[(start + 1)..<dotIndex])
             .replacingOccurrences(of: ".", with: "")
             .lowercased()
-        return abbreviations.contains(word)
+        return abbreviations.contains(word) ? word : nil
     }
 }
 
