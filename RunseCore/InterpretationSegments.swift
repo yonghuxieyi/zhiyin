@@ -101,6 +101,16 @@ public struct InterpretationSegmentAssembler: Sendable {
     /// (sourceFinal); the next partial then starts a new sentence
     /// and re-arms the timestamp.
     private var sourceSentenceEnded = false
+    /// Latency baselines in source order: (sentence number,
+    /// wall-clock start). A translation pairs with the earliest
+    /// unsettled source sentence (same order as appendTranslation),
+    /// so the sample always uses THAT sentence's start — S23: the
+    /// old code sampled `Date() - sourceSentenceStartedAt`, which
+    /// was already the NEXT sentence's start when a translation
+    /// arrived late. Entries are consumed FIFO at translationFinal;
+    /// a translation with no baseline samples nil.
+    private var pendingBaselines: [(number: Int, startedAt: Date)] = []
+    private var sourceSentenceNumber = 0
     /// Latency sampled when the first translation text arrives (see
     /// `apply`): attached to the segment when it settles.
     private var pendingLatencyMs: Double?
@@ -127,8 +137,11 @@ public struct InterpretationSegmentAssembler: Sendable {
             if speakerChanged { pendingSourceSpeakerChanged = true }
         case .sourcePartial(let text):
             if sourceDraft.isEmpty && (sourceSentenceEnded || sourceSentenceStartedAt == nil) {
-                sourceSentenceStartedAt = .now
+                let now = Date()
+                sourceSentenceStartedAt = now
                 sourceSentenceEnded = false
+                sourceSentenceNumber += 1
+                pendingBaselines.append((sourceSentenceNumber, now))
             }
             sourceDraft = text
         case .sourceFinal(let text, let startMs, let endMs, let speakerChanged):
@@ -145,22 +158,27 @@ public struct InterpretationSegmentAssembler: Sendable {
             if speakerChanged { pendingTranslationSpeakerChanged = true }
         case .translationPartial(let text):
             // First translation text for this sentence: sample the
-            // delay from the source sentence starting. Only the first
-            // sample counts; later partials are the same sentence.
-            if !text.isEmpty, pendingLatencyMs == nil, let startedAt = sourceSentenceStartedAt {
-                pendingLatencyMs = Date().timeIntervalSince(startedAt) * 1000
+            // delay from the earliest unsettled source sentence's
+            // start (FIFO — the sentence this translation pairs
+            // with). Only the first sample counts; later partials
+            // are the same sentence.
+            if !text.isEmpty, pendingLatencyMs == nil, let baseline = pendingBaselines.first {
+                pendingLatencyMs = Date().timeIntervalSince(baseline.startedAt) * 1000
             }
             translationDraft = text
         case .translationFinal(let text, let startMs, let endMs, let speakerChanged):
             translationDraft = ""
             // If no partial ever arrived, the final IS the first
-            // translation text — sample here instead.
-            if pendingLatencyMs == nil, let startedAt = sourceSentenceStartedAt {
-                pendingLatencyMs = Date().timeIntervalSince(startedAt) * 1000
+            // translation text — sample here instead. No baseline
+            // (translation with no source sentence) samples nil.
+            if pendingLatencyMs == nil, let baseline = pendingBaselines.first {
+                pendingLatencyMs = Date().timeIntervalSince(baseline.startedAt) * 1000
             }
             appendTranslation(text: text, startMs: startMs, endMs: endMs, speakerChanged: speakerChanged || pendingTranslationSpeakerChanged, latencyMs: pendingLatencyMs)
             pendingTranslationSpeakerChanged = false
             pendingLatencyMs = nil
+            // This translation consumed the earliest baseline.
+            if !pendingBaselines.isEmpty { pendingBaselines.removeFirst() }
             // Sampled (or unmeasurable): re-arm for the next sentence.
             sourceSentenceStartedAt = nil
         case .sessionStarted, .ttsAudio, .ttsSentenceStarted, .ttsSentenceEnded, .muted, .usage, .sessionFinished, .failed:

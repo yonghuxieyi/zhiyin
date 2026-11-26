@@ -5,7 +5,7 @@ final class ProviderTests: XCTestCase {
     func testOpenAICompatibleRequestEncoding() throws {
         let profile = ProviderProfile.defaultDeepSeek()
         let request = LLMRequest(action: .refine, model: profile.model, systemPrompt: "system", userPrompt: "user")
-        let body = ProviderRequestFactory.body(profile: profile, request: request)
+        let body = try ProviderRequestFactory.body(profile: profile, request: request)
 
         XCTAssertEqual(body["model"] as? String, "deepseek-flash")
         let messages = body["messages"] as? [[String: String]]
@@ -16,7 +16,7 @@ final class ProviderTests: XCTestCase {
     func testDeepSeekRequestDisablesThinking() throws {
         let profile = ProviderProfile.defaultDeepSeek()
         let request = LLMRequest(action: .refine, model: profile.model, systemPrompt: "system", userPrompt: "user")
-        let body = ProviderRequestFactory.body(profile: profile, request: request)
+        let body = try ProviderRequestFactory.body(profile: profile, request: request)
 
         // Thinking on makes DeepSeek ignore `temperature`; translation calls
         // must disable it explicitly.

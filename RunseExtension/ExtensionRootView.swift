@@ -14,7 +14,9 @@ struct ExtensionRootView: View {
     @State private var tone: Tone = .natural
     @State private var formality: Formality = .neutral
     @State private var length: OutputLength = .same
-    @State private var targetLanguage = SettingsStore().defaultTranslationLanguage
+    // S16: the SettingsStore default-language setting is gone (it
+    // had no reader); the extension defaults to the constant.
+    @State private var targetLanguage = RunseConstants.defaultTranslationLanguage
     @State private var customInstruction = ""
     @State private var result = ""
     @State private var errorMessage: String?
@@ -25,6 +27,11 @@ struct ExtensionRootView: View {
     var body: some View {
         NavigationStack {
             Form {
+                // S19: the labels below stay English literals on
+                // purpose — they resolve through LocalizedStringKey
+                // against the extension's Localizable.strings (zh-Hans
+                // / zh-Hant / ja / ko all ship). Hardcoding Chinese
+                // here would drop the other locales.
                 Picker("Action", selection: $action) {
                     ForEach(TransformAction.allCases) { Text(LocalizedStringKey($0.title)).tag($0) }
                 }

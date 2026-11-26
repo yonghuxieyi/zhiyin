@@ -106,8 +106,14 @@ public enum VolcanoTTSFrame {
     /// Decodes the first complete frame in `buffer`, returning it and
     /// the number of bytes consumed, or nil when the buffer holds no
     /// complete frame yet.
+    ///
+    /// S4: byte 0 must be the `0x11` magic (protocol version 1,
+    /// 4-byte header). A stream that lost alignment used to be
+    /// parsed with garbage lengths and then wait forever for a huge
+    /// payload — a bad magic returns nil and the caller resyncs via
+    /// `resyncDropCount` instead of trusting the bytes.
     public static func decodeFirst(from buffer: Data) -> (frame: DecodedFrame, consumed: Int)? {
-        guard buffer.count >= 4 else { return nil }
+        guard buffer.count >= 4, buffer[0] == 0x11 else { return nil }
         let type = buffer[1] >> 4
         let flags = buffer[1] & 0x0F
         let isJSON = (buffer[2] >> 4) == 0x1
@@ -163,6 +169,21 @@ public enum VolcanoTTSFrame {
         guard buffer.count >= offset + payloadSize else { return nil }
         let payload = buffer.subdata(in: offset..<(offset + payloadSize))
         return (DecodedFrame(type: type, flags: flags, isJSON: isJSON, event: event, sessionID: sessionID, connectID: connectID, sequence: sequence, payload: payload), offset + payloadSize)
+    }
+
+    /// S4: leading bytes that cannot start a frame, to drop before
+    /// decoding. A frame starts with the `0x11` magic; anything
+    /// before the next `0x11` is garbage from a lost alignment.
+    /// Returns 0 when the buffer is empty, starts with a valid
+    /// magic, or holds a short prefix that may still be a frame
+    /// start (callers only drop when a full magic scan fails).
+    public static func resyncDropCount(in buffer: Data) -> Int {
+        var count = 0
+        while count < buffer.count {
+            if buffer[count] == 0x11 { return count }
+            count += 1
+        }
+        return count
     }
 }
 
@@ -316,6 +337,13 @@ public actor VolcanoStreamingTTSClient {
         guard let task = socketTask else { throw VolcanoVoiceError.connectionFailed("Streaming TTS socket is not connected") }
         let deadline = Date().addingTimeInterval(timeout)
         while true {
+            // S4: drop garbage bytes before the next frame start so
+            // a lost alignment resyncs instead of stalling to timeout.
+            let drop = VolcanoTTSFrame.resyncDropCount(in: buffer)
+            if drop > 0 {
+                buffer.removeFirst(drop)
+                continue
+            }
             if let decoded = VolcanoTTSFrame.decodeFirst(from: buffer) {
                 buffer.removeFirst(decoded.consumed)
                 return decoded.frame

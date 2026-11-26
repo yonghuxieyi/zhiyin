@@ -65,10 +65,15 @@ public enum ModelCatalog {
     public static let deepSeekFlashID = "deepseek-flash-1"
     public static let deepSeekProID = "deepseek-pro-1"
 
-    /// All options, grouped. Voice and Qwen-MT availability are filled
-    /// in by the UI from the keychain (configured or not); everything
-    /// else is static.
-    public static func options(voiceConfigured: Bool, qwenConfigured: Bool = false) -> [ModelOption] {
+    /// All options, grouped. Qwen-MT and DeepSeek availability are
+    /// filled in by the UI from the keychain (configured or not);
+    /// everything else is static. `voiceConfigured` is kept for
+    /// callers that already pass it; no voice option lives in this
+    /// catalog anymore (see S13 below).
+    /// S13: DeepSeek is no longer hardcoded available — without a key
+    /// it shows needsKey, like Qwen-MT does. One DeepSeek key covers
+    /// both DeepSeek options (see ProviderProfile.isDeepSeek).
+    public static func options(voiceConfigured: Bool, qwenConfigured: Bool = false, deepSeekConfigured: Bool = false) -> [ModelOption] {
         [
             ModelOption(
                 id: deepSeekFlashID,
@@ -76,7 +81,7 @@ public enum ModelCatalog {
                 detail: "deepseek-flash · 快、便宜，日常翻译",
                 group: .cloudChina,
                 profileID: RunseConstants.defaultProfileID,
-                status: .available
+                status: deepSeekConfigured ? .available : .needsKey("需要配置 API Key")
             ),
             ModelOption(
                 id: deepSeekProID,
@@ -84,7 +89,7 @@ public enum ModelCatalog {
                 detail: "deepseek-v4-pro · 长文、难句精翻",
                 group: .cloudChina,
                 profileID: RunseConstants.deepSeekProProfileID,
-                status: .available
+                status: deepSeekConfigured ? .available : .needsKey("需要配置 API Key")
             ),
             ModelOption(
                 id: QwenMT.flashProfileID,
@@ -122,19 +127,17 @@ public enum ModelCatalog {
                 detail: "国外云端，同价备选",
                 group: .cloudOverseas,
                 status: .needsKey("需要配置 Key，暂未接入")
-            ),
-            ModelOption(
-                id: "doubao-voice",
-                name: "豆包语音",
-                detail: "火山豆包流式识别 + 合成",
-                group: .voice,
-                status: voiceConfigured ? .available : .needsKey("未配置 AppID 和 Access Token")
             )
+            // S13: no "豆包语音" option here — it is a voice service,
+            // not a translation model. Picking it used to write
+            // selectedModelOptionID while translation silently kept
+            // using DeepSeek, so the settings page lied about the
+            // current model. Voice status lives in Settings → 语音.
         ]
     }
 
-    public static func option(id: String, voiceConfigured: Bool, qwenConfigured: Bool = false) -> ModelOption? {
-        options(voiceConfigured: voiceConfigured, qwenConfigured: qwenConfigured).first { $0.id == id }
+    public static func option(id: String, voiceConfigured: Bool, qwenConfigured: Bool = false, deepSeekConfigured: Bool = false) -> ModelOption? {
+        options(voiceConfigured: voiceConfigured, qwenConfigured: qwenConfigured, deepSeekConfigured: deepSeekConfigured).first { $0.id == id }
     }
 }
 

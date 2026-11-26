@@ -62,7 +62,10 @@ public enum DualModelCompare {
         let primaryTrimmed = primary.trimmingCharacters(in: .whitespacesAndNewlines)
         let secondTrimmed = second.trimmingCharacters(in: .whitespacesAndNewlines)
         if primaryTrimmed.isEmpty, secondTrimmed.isEmpty {
-            return Verdict(agreed: true, chosen: primary, other: second, reason: "两模型都没翻出内容。", primaryWon: true)
+            // S22: nothing came back from either model — that is not
+            // agreement, it is a double failure. Flag it for review
+            // instead of recording "agreed" with an empty paragraph.
+            return Verdict(agreed: false, chosen: primary, other: second, reason: "两模型都没翻出内容。（需人工复核）", primaryWon: true, needsReview: true)
         }
         if primaryTrimmed.isEmpty {
             return Verdict(agreed: false, chosen: second, other: primary, reason: "主模型没翻出内容，改用\(secondName)。（需人工复核）", primaryWon: false, needsReview: true)

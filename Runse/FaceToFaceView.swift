@@ -52,6 +52,14 @@ struct FaceToFaceView: View {
     // they keep running after the page is left.
     @State private var transcriptTask: Task<Void, Never>?
     @State private var audioFeedTask: Task<Void, Never>?
+    // S24: stored handle for the toggle/stop run — the 取消 button
+    // (shown while translating) cancels it.
+    @State private var toggleTask: Task<Void, Never>?
+    /// S14: one streaming TTS connection reused across turns (the
+    /// client serves many sessions per connection); dropped on error
+    /// so a broken socket does not poison later turns, and on
+    /// disappear.
+    @State private var streamingTTSClient: VolcanoStreamingTTSClient?
 
     private var latestTurn: FaceTurn? { turns.last }
 
@@ -82,7 +90,7 @@ struct FaceToFaceView: View {
                             .multilineTextAlignment(.center)
                     }
                     Button {
-                        Task { await toggleListening(side: .them) }
+                        toggleTask = Task { await toggleListening(side: .them) }
                     } label: {
                         Label(listeningSide == .them ? "正在听…" : "对方说话", systemImage: "mic")
                     }
@@ -120,12 +128,20 @@ struct FaceToFaceView: View {
                     }
                     HStack(spacing: 16) {
                         Button {
-                            Task { await toggleListening(side: .me) }
+                            toggleTask = Task { await toggleListening(side: .me) }
                         } label: {
                             Label(listeningSide == .me ? "正在听…" : "我说", systemImage: "mic")
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled((isWorking || listeningSide != nil) && listeningSide != .me)
+                        if isWorking {
+                            Button {
+                                toggleTask?.cancel()
+                            } label: {
+                                Label("取消", systemImage: "xmark.circle")
+                            }
+                            .buttonStyle(.bordered)
+                        }
                         Button {
                             Task { await replayLatest() }
                         } label: {
@@ -164,6 +180,11 @@ struct FaceToFaceView: View {
             // indicator stays on.
             if listeningSide != nil {
                 Task { await stopListening() }
+            }
+            // S14: drop the reused streaming TTS connection too.
+            if let client = streamingTTSClient {
+                streamingTTSClient = nil
+                Task { await client.disconnect() }
             }
         }
     }
@@ -220,6 +241,12 @@ struct FaceToFaceView: View {
 
     @MainActor
     private func stopListening() async {
+        // S24: a long translation must not let the screen lock.
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer {
+            toggleTask = nil
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
         transcriptTask?.cancel()
         transcriptTask = nil
         audioFeedTask?.cancel()
@@ -240,6 +267,9 @@ struct FaceToFaceView: View {
             liveTranscript = ""
             guard let side, !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             try await translateAndSpeak(finalText, side: side)
+        } catch is CancellationError {
+            // S24: cancelled via 取消 — the finished turn stays in
+            // the list, no error message.
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -254,7 +284,9 @@ struct FaceToFaceView: View {
         let target = TextLanguage.detect(text).translationTarget
         let parts = TextSegmenter.segments(for: text, maxChars: TextSegmenter.maxChars(for: profile))
         let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
-        let results = try await pipeline.translate(
+        // S1: partial outcome — a segment that fails mid-run keeps the
+        // finished part in the turn instead of dropping the whole round.
+        let outcome = try await pipeline.translatePartial(
             segments: parts,
             profile: profile,
             apiKey: apiKey,
@@ -265,7 +297,11 @@ struct FaceToFaceView: View {
             fallbackProfile: fallback?.profile,
             fallbackAPIKey: fallback?.apiKey
         ) { _, _ in }
+        let results = outcome.results
         let translation = results.map(\.translation).joined(separator: "\n")
+        if let failedIndex = outcome.failedSegmentIndex, let error = outcome.error {
+            errorMessage = "第 \(failedIndex + 1) 段翻译失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)（已译部分已保留）"
+        }
         turns.append(FaceTurn(speaker: side, source: text, translation: translation))
         // F1: one history row per model that actually translated —
         // booking the mixed total under the primary model priced
@@ -283,7 +319,7 @@ struct FaceToFaceView: View {
                 model: model,
                 action: .translate,
                 targetLanguage: target,
-                status: "success",
+                status: outcome.isComplete ? "success" : "partial · 第 \(outcome.failedSegmentIndex! + 1) 段失败",
                 promptTokens: usage["prompt_tokens"] ?? 0,
                 completionTokens: usage["completion_tokens"] ?? 0,
                 totalTokens: usage["total_tokens"] ?? 0
@@ -313,24 +349,55 @@ struct FaceToFaceView: View {
                 let audio = try await QwenVoiceClone.synthesize(apiKey: apiKey, workspaceID: workspaceID, text: text, voiceID: voiceID, rate: settings.speechRate)
                 try player.play(data: audio)
                 return
+            } catch is CancellationError {
+                // S24: a cancel during TTS stops quietly — it must
+                // not fall through to the next synthesis path or end
+                // as a spurious "语音合成失败".
+                return
             } catch {
                 // Fall through to the Doubao paths.
             }
         }
         do {
-            let client = VolcanoStreamingTTSClient(config: config)
-            try await client.connect()
-            defer { Task { await client.disconnect() } }
-            try streamingPlayer.start()
-            let settings = VoiceSettings()
-            try await client.synthesize(text: text, speaker: settings.speakerID, speechRate: settings.speechRate) { pcm in
-                streamingPlayer.enqueue(pcm)
+            // S14: reuse the page-level streaming connection instead
+            // of a fresh connect per turn.
+            let client: VolcanoStreamingTTSClient
+            if let existing = streamingTTSClient {
+                client = existing
+            } else {
+                let created = VolcanoStreamingTTSClient(config: config)
+                try await created.connect()
+                streamingTTSClient = created
+                client = created
             }
+            do {
+                try streamingPlayer.start()
+                let settings = VoiceSettings()
+                try await client.synthesize(text: text, speaker: settings.speakerID, speechRate: settings.speechRate) { pcm in
+                    streamingPlayer.enqueue(pcm)
+                }
+            } catch is CancellationError {
+                // S24: cancelling must not poison the shared
+                // connection (the generic catch below disconnects it).
+                return
+            } catch {
+                // A broken connection must not poison later turns.
+                if let stored = streamingTTSClient {
+                    streamingTTSClient = nil
+                    await stored.disconnect()
+                }
+                throw error
+            }
+        } catch is CancellationError {
+            // S24: a cancel during connect stops quietly.
+            return
         } catch {
             do {
                 let settings = VoiceSettings()
                 let audio = try await VolcanoTTSClient(config: config).synthesize(text: text, speaker: settings.speakerID, speechRate: settings.speechRate)
                 try player.play(data: audio)
+            } catch is CancellationError {
+                return
             } catch {
                 errorMessage = "语音合成失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
             }

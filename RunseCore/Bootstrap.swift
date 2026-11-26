@@ -112,6 +112,36 @@ public enum Bootstrap {
     }
 }
 
+/// S25: the seed failure used to be swallowed by `try?` in
+/// ZhiyinApp, so a failed first launch left every screen reporting
+/// "Key 未配置 / 地址无效" with no clue why. The failure is now
+/// recorded (message + date) in the app-group defaults, shown in
+/// Settings with a manual retry, and retried on the next launch
+/// (seeding is insert-only, so a retry is safe).
+public enum BootstrapSeedStatus {
+    private static let messageKey = "Zhiyin.SeedFailedMessage"
+    private static let dateKey = "Zhiyin.SeedFailedAt"
+
+    private static var defaults: UserDefaults {
+        UserDefaults(suiteName: RunseConstants.appGroupID) ?? .standard
+    }
+
+    public static func record(_ message: String) {
+        defaults.set(message, forKey: messageKey)
+        defaults.set(Date(), forKey: dateKey)
+    }
+
+    public static func clear() {
+        defaults.removeObject(forKey: messageKey)
+        defaults.removeObject(forKey: dateKey)
+    }
+
+    public static func load() -> (message: String, date: Date)? {
+        guard let message = defaults.string(forKey: messageKey) else { return nil }
+        return (message, defaults.object(forKey: dateKey) as? Date ?? Date())
+    }
+}
+
 public enum TextExcerpt {
     public static func make(_ text: String, maxLength: Int = 240) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)

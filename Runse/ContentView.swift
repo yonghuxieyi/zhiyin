@@ -369,12 +369,19 @@ struct GuideDemoTextView: View {
 
 
 struct SettingsView: View {
-    @State private var language = SettingsStore().defaultTranslationLanguage
     @State private var tone = SettingsStore().translationTone
     @State private var showingGetStarted = false
     @State private var showingModelPicker = false
     @State private var voiceConfigured = false
     @State private var qwenConfigured = false
+    /// S13: whether either DeepSeek profile has a key (one key
+    /// covers both DeepSeek options).
+    @State private var deepSeekConfigured = false
+    /// S12: manual balance update — there is no console API to
+    /// query the balance, so the user types the figure from the
+    /// voice console and it is shown with its date.
+    @State private var balanceInput = ""
+    @State private var balanceSaved = false
     @State private var dashScopeKey = ""
     @State private var dashScopeSaved = false
     @State private var dashScopeError: String?
@@ -384,11 +391,20 @@ struct SettingsView: View {
     @State private var providerKeyConfigured = false
     @State private var providerKeySaved = false
     @State private var providerKeyError: String?
+    /// S6: a keychain read fault is not "not configured" — when set,
+    /// the settings page says so instead of showing 未配置.
+    @State private var keychainReadError: String?
+    /// S25: a recorded seeding failure, shown at the top of Settings
+    /// with a manual retry instead of leaving every screen to report
+    /// missing Key / invalid URL.
+    @State private var seedFailure: (message: String, date: Date)?
+    @State private var seedRetryMessage: String?
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \TransformHistory.timestamp, order: .reverse) private var historyItems: [TransformHistory]
     private let settings = SettingsStore()
 
     private var currentModelName: String {
-        ModelCatalog.option(id: settings.selectedModelOptionID, voiceConfigured: voiceConfigured, qwenConfigured: qwenConfigured)?.name
+        ModelCatalog.option(id: settings.selectedModelOptionID, voiceConfigured: voiceConfigured, qwenConfigured: qwenConfigured, deepSeekConfigured: deepSeekConfigured)?.name
             ?? "DeepSeek 日常"
     }
 
@@ -397,7 +413,7 @@ struct SettingsView: View {
     /// below); every other profile uses its own key under
     /// `Zhiyin.ProviderAPIKey` (M1).
     private var currentProfileID: String? {
-        ModelCatalog.option(id: settings.selectedModelOptionID, voiceConfigured: voiceConfigured, qwenConfigured: qwenConfigured)?.profileID
+        ModelCatalog.option(id: settings.selectedModelOptionID, voiceConfigured: voiceConfigured, qwenConfigured: qwenConfigured, deepSeekConfigured: deepSeekConfigured)?.profileID
     }
 
     private var isCurrentModelQwenMT: Bool {
@@ -405,10 +421,37 @@ struct SettingsView: View {
         return id == QwenMT.flashProfileID || id == QwenMT.plusProfileID
     }
 
+    /// The profile id the API Key row saves under: the current
+    /// non-Qwen profile, or the default DeepSeek profile when
+    /// Qwen-MT is selected but no DeepSeek key exists yet. Without
+    /// the second case the picker could never switch back to
+    /// DeepSeek — needsKey options are not selectable, and the key
+    /// row would be hidden behind the Qwen selection.
+    private var apiKeyProfileID: String? {
+        if let profileID = currentProfileID, !isCurrentModelQwenMT {
+            return profileID
+        }
+        if !deepSeekConfigured {
+            return RunseConstants.defaultProfileID
+        }
+        return nil
+    }
+
     private func refreshProviderKeyStatus() {
         Task {
-            if let profileID = currentProfileID, !isCurrentModelQwenMT {
-                providerKeyConfigured = await ProviderKeyStore.hasKey(profileID: profileID)
+            // S13: keep the DeepSeek status in sync when the picker
+            // closes (a key may have just been saved for it).
+            deepSeekConfigured = await ProviderKeyStore.hasKey(profileID: RunseConstants.defaultProfileID)
+                || await ProviderKeyStore.hasKey(profileID: RunseConstants.deepSeekProProfileID)
+            if let profileID = apiKeyProfileID {
+                do {
+                    providerKeyConfigured = try await ProviderKeyStore.loadKeyThrowing(profileID: profileID) != nil
+                    keychainReadError = nil
+                } catch {
+                    // S6: a keychain fault is not "not configured".
+                    providerKeyConfigured = false
+                    keychainReadError = "钥匙串读取失败：\(error.localizedDescription)"
+                }
             } else {
                 providerKeyConfigured = false
             }
@@ -422,6 +465,37 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                // S25: a failed first-launch seeding used to surface
+                // only as "Key 未配置 / 地址无效" on every screen.
+                if let seedFailure {
+                    Section("初始化失败") {
+                        Text("启动时没能写入默认模型和模板（\(seedFailure.date.formatted(date: .abbreviated, time: .shortened))），各页面可能报 Key 未配置或地址无效。下次启动会自动再试，也可以现在重试。")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                        Text(seedFailure.message)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Button("重试初始化") {
+                            Task { @MainActor in
+                                do {
+                                    try Bootstrap.seedDefaultsIfNeeded(context: modelContext)
+                                    BootstrapSeedStatus.clear()
+                                    self.seedFailure = nil
+                                    seedRetryMessage = "初始化成功，默认模型和模板已补齐。"
+                                } catch {
+                                    BootstrapSeedStatus.record(error.localizedDescription)
+                                    self.seedFailure = BootstrapSeedStatus.load()
+                                    seedRetryMessage = nil
+                                }
+                            }
+                        }
+                        if let seedRetryMessage {
+                            Text(seedRetryMessage)
+                                .font(.footnote)
+                                .foregroundStyle(.green)
+                        }
+                    }
+                }
                 Section("模型") {
                     HStack {
                         Text("当前模型")
@@ -441,14 +515,15 @@ struct SettingsView: View {
                         Text("Qwen-MT 用下面的 DashScope Key，不用在这里填。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                    } else if let profileID = currentProfileID {
+                    }
+                    if let profileID = apiKeyProfileID {
                         HStack {
                             Text("API Key")
                             Spacer()
                             Text(providerKeyConfigured ? "已配置" : "未配置")
                                 .foregroundStyle(providerKeyConfigured ? .green : .orange)
                         }
-                        SecureField("粘贴当前模型的 API Key", text: $providerKey)
+                        SecureField(profileID == currentProfileID ? "粘贴当前模型的 API Key" : "粘贴 DeepSeek API Key（切回 DeepSeek 时用）", text: $providerKey)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                         Button("保存 Key") {
@@ -476,6 +551,11 @@ struct SettingsView: View {
                                 .font(.footnote)
                                 .foregroundStyle(.red)
                         }
+                        if let keychainReadError {
+                            Text(keychainReadError)
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                        }
                         if !providerKeyConfigured {
                             Text("没配 Key 时翻译会报“缺少 API Key”，先在这里粘贴保存。")
                                 .font(.footnote)
@@ -491,8 +571,35 @@ struct SettingsView: View {
                         Text(voiceConfigured ? "已配置" : "未配置")
                             .foregroundStyle(voiceConfigured ? .green : .orange)
                     }
+                    if let keychainReadError {
+                        Text(keychainReadError)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
                     if !voiceConfigured {
                         Text("去“语音”页填 AppID 和 Access Token（只存钥匙串）。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    // S12: the balance has no query API — update it by
+                    // hand from the voice console; the interpretation
+                    // page shows it with the date it was entered.
+                    HStack {
+                        Text("账户余额（元）")
+                        TextField("如 2.36", text: $balanceInput)
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                        Button("保存") {
+                            if let value = Double(balanceInput.trimmingCharacters(in: .whitespaces)) {
+                                InterpretationQuotaStore().setBalance(value)
+                                balanceSaved = true
+                                balanceInput = ""
+                            }
+                        }
+                        .disabled(Double(balanceInput.trimmingCharacters(in: .whitespaces)) == nil)
+                    }
+                    if balanceSaved {
+                        Text("余额已更新，同传页会显示这个数和今天的日期。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -504,6 +611,11 @@ struct SettingsView: View {
                         Spacer()
                         Text(qwenConfigured ? "已配置" : "未配置")
                             .foregroundStyle(qwenConfigured ? .green : .orange)
+                    }
+                    if let keychainReadError {
+                        Text(keychainReadError)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
                     }
                     SecureField("粘贴 DashScope API Key", text: $dashScopeKey)
                         .textInputAutocapitalization(.never)
@@ -544,6 +656,19 @@ struct SettingsView: View {
                                 workspaceSaved = true
                             } catch {
                                 dashScopeError = "保存失败：\(error.localizedDescription)"
+                            }
+                        }
+                    }
+                    // S18: a mistyped workspace ID had no way back —
+                    // add a clear path (back to the default domain).
+                    Button("清除业务空间 ID", role: .destructive) {
+                        Task {
+                            do {
+                                try await DashScopeStore.clearWorkspaceID()
+                                dashScopeWorkspaceID = ""
+                                workspaceSaved = false
+                            } catch {
+                                dashScopeError = "清除失败：\(error.localizedDescription)"
                             }
                         }
                     }
@@ -601,10 +726,11 @@ struct SettingsView: View {
                     .onChange(of: tone) { _, value in
                         settings.translationTone = value
                     }
-                    TextField("默认翻译语言", text: $language)
-                        .onChange(of: language) { _, value in
-                            settings.defaultTranslationLanguage = value
-                        }
+                    // S16: the "默认翻译语言" free-text field was
+                    // removed — no screen ever read it (every
+                    // translation passes its target explicitly, and
+                    // PromptContext defaults to the constant), so
+                    // typing in it silently did nothing.
                 }
 
                 Section("帮助") {
@@ -625,9 +751,25 @@ struct SettingsView: View {
                 ModelPickerSheet()
             }
             .task {
-                let config = await VolcanoVoiceStore.load()
-                voiceConfigured = config != nil
-                qwenConfigured = await DashScopeStore.hasKey()
+                // S25: surface a recorded seeding failure, if any.
+                seedFailure = BootstrapSeedStatus.load()
+                // S6: throwing loads — a keychain fault must surface
+                // as a read failure, not as "not configured".
+                do {
+                    voiceConfigured = try await VolcanoVoiceStore.loadThrowing() != nil
+                } catch {
+                    voiceConfigured = false
+                    keychainReadError = "钥匙串读取失败：\(error.localizedDescription)"
+                }
+                do {
+                    qwenConfigured = try await DashScopeStore.loadKeyThrowing() != nil
+                } catch {
+                    qwenConfigured = false
+                    keychainReadError = "钥匙串读取失败：\(error.localizedDescription)"
+                }
+                // S13: one DeepSeek key covers both DeepSeek options.
+                deepSeekConfigured = await ProviderKeyStore.hasKey(profileID: RunseConstants.defaultProfileID)
+                    || await ProviderKeyStore.hasKey(profileID: RunseConstants.deepSeekProProfileID)
                 dashScopeWorkspaceID = await DashScopeStore.loadWorkspaceID() ?? ""
                 refreshProviderKeyStatus()
             }

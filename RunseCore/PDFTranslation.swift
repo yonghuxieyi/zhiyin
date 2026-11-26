@@ -227,6 +227,24 @@ public enum PDFProgressStore {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// S8: stream the file in 1 MB chunks instead of loading the
+    /// whole document into memory just to hash it (a multi-hundred
+    /// MB scanned PDF used to eat that much RAM and risk jetsam).
+    public static func documentHash(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// S8: import size guard — refuse oversized documents before
+    /// reading them into memory. 200 MB covers real books many times
+    /// over; a scanned archive bigger than that is not a phone job.
+    public static let maxImportBytes: Int64 = 200 * 1024 * 1024
+
     public static func progressURL(forHash hash: String) -> URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Zhiyin/PDFProgress", isDirectory: true)
@@ -285,10 +303,14 @@ public enum PDFTranslation {
         charCount < 30 && textCoverage < 0.01
     }
 
+    /// S2: throws on cancellation (one `checkCancellation` per page)
+    /// so a long scanned document can be stopped mid-extraction
+    /// instead of blocking the UI for tens of seconds.
     @MainActor
-    public static func extractPages(from document: PDFDocument) async -> [PDFPageContent] {
+    public static func extractPages(from document: PDFDocument) async throws -> [PDFPageContent] {
         var result: [PDFPageContent] = []
         for index in 0..<document.pageCount {
+            try Task.checkCancellation()
             guard let page = document.page(at: index) else { continue }
             let size = page.bounds(for: .mediaBox).size
             let rawText = page.string ?? ""
@@ -395,6 +417,11 @@ public enum PDFTranslation {
     /// Builds the translated PDF. Returns nil when there is nothing to
     /// export. Pages with line boxes use the in-place path; scanned
     /// pages (and pages without boxes) use the simplified path.
+    /// S9: the in-place decision is per paragraph, not per page — a
+    /// single unlocated paragraph used to drag its whole page down
+    /// to the simplified layout. Boxed paragraphs are replaced in
+    /// place; box-less ones are appended at the page end (or a
+    /// continuation page when they do not fit).
     public static func exportPDF(original: PDFDocument, translatedPages: [PDFTranslatedPage]) -> Data? {
         guard !translatedPages.isEmpty else { return nil }
         let format = UIGraphicsPDFRendererFormat()
@@ -403,17 +430,73 @@ public enum PDFTranslation {
             for tpage in translatedPages {
                 guard let originalPage = original.page(at: tpage.index) else { continue }
                 let pageSize = tpage.pageSize
-                let canDoInPlace = !tpage.isScanned && tpage.paragraphs.allSatisfy { $0.bounds != .zero }
-                if canDoInPlace {
-                    context.beginPage(withBounds: CGRect(origin: .zero, size: pageSize), pageInfo: [:])
-                    drawOriginalPage(originalPage, pageSize: pageSize, in: context.cgContext)
-                    for paragraph in tpage.paragraphs {
-                        drawTranslatedParagraph(paragraph, pageSize: pageSize, in: context.cgContext)
-                    }
-                } else {
+                let boxedCount = tpage.paragraphs.filter { $0.bounds != .zero }.count
+                if tpage.isScanned || (boxedCount == 0 && !tpage.paragraphs.isEmpty) {
                     drawSimplifiedPage(originalPage: originalPage, tpage: tpage, in: context)
+                    continue
+                }
+                context.beginPage(withBounds: CGRect(origin: .zero, size: pageSize), pageInfo: [:])
+                drawOriginalPage(originalPage, pageSize: pageSize, in: context.cgContext)
+                var unboxed: [PDFTranslatedParagraph] = []
+                // UIKit y just below the lowest boxed paragraph.
+                var lowestY: CGFloat = 36
+                for paragraph in tpage.paragraphs {
+                    if paragraph.bounds != .zero {
+                        drawTranslatedParagraph(paragraph, pageSize: pageSize, in: context.cgContext)
+                        lowestY = max(lowestY, pageSize.height - paragraph.bounds.minY)
+                    } else {
+                        unboxed.append(paragraph)
+                    }
+                }
+                if !unboxed.isEmpty {
+                    drawAppendedParagraphs(unboxed, below: lowestY, pageSize: pageSize, in: context)
                 }
             }
+        }
+    }
+
+    /// S9: box-less translations, appended at the page end. Fits
+    /// below the page content when there is room (with a white cover
+    /// so the original text underneath does not show through);
+    /// otherwise spills onto a continuation page so nothing is
+    /// covered or lost.
+    private static func drawAppendedParagraphs(_ paragraphs: [PDFTranslatedParagraph], below topY: CGFloat, pageSize: CGSize, in context: UIGraphicsPDFRendererContext) {
+        let font = UIFont.systemFont(ofSize: 11)
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 3
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: style]
+        let width = pageSize.width - 72
+        let full = paragraphs.map(\.translation).joined(separator: "\n\n") as NSString
+        let totalHeight = full.boundingRect(
+            with: CGSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes, context: nil
+        ).size.height
+        let startY = topY + 12
+        if startY + totalHeight <= pageSize.height - 36 {
+            let rect = CGRect(x: 36, y: startY, width: width, height: totalHeight)
+            context.cgContext.saveGState()
+            context.cgContext.setFillColor(UIColor.white.cgColor)
+            context.cgContext.fill(rect.insetBy(dx: -4, dy: -4))
+            context.cgContext.restoreGState()
+            full.draw(with: rect, options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attributes, context: nil)
+            return
+        }
+        context.beginPage(withBounds: CGRect(origin: .zero, size: pageSize), pageInfo: [:])
+        var y: CGFloat = 36
+        for paragraph in paragraphs {
+            let text = paragraph.translation as NSString
+            let height = text.boundingRect(
+                with: CGSize(width: width, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attributes, context: nil
+            ).size.height
+            if y + height > pageSize.height - 36, y > 36 {
+                context.beginPage(withBounds: CGRect(origin: .zero, size: pageSize), pageInfo: [:])
+                y = 36
+            }
+            text.draw(with: CGRect(x: 36, y: y, width: width, height: height), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attributes, context: nil)
+            y += height + 8
         }
     }
 

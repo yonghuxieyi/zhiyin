@@ -20,6 +20,9 @@ struct PhotoView: View {
     @State private var recognizedText = ""
     @State private var translation = ""
     @State private var isWorking = false
+    // S24: stored handle for the translation run (isWorking is
+    // shared with OCR, so the 取消 button keys off this handle).
+    @State private var translationTask: Task<Void, Never>?
     @State private var errorMessage: String?
     @State private var didCopy = false
 
@@ -72,7 +75,7 @@ struct PhotoView: View {
 
                 HStack {
                     Button {
-                        Task { await runTranslation() }
+                        translationTask = Task { await runTranslation() }
                     } label: {
                         if isWorking {
                             ProgressView()
@@ -81,6 +84,14 @@ struct PhotoView: View {
                         }
                     }
                     .disabled(recognizedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isWorking)
+
+                    if translationTask != nil {
+                        Button {
+                            translationTask?.cancel()
+                        } label: {
+                            Label("取消", systemImage: "xmark.circle")
+                        }
+                    }
 
                     Spacer()
 
@@ -173,7 +184,13 @@ struct PhotoView: View {
         isWorking = true
         errorMessage = nil
         didCopy = false
-        defer { isWorking = false }
+        // S24: a long translation must not let the screen lock.
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer {
+            isWorking = false
+            translationTask = nil
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
         do {
             let request = try await TranslationRequestResolver.resolve(profiles: profiles, templates: templates)
             let profile = request.profile
@@ -183,7 +200,9 @@ struct PhotoView: View {
             let parts = TextSegmenter.segments(for: recognizedText, maxChars: TextSegmenter.maxChars(for: profile))
             var partials = Array(repeating: "", count: parts.count)
             let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
-            let results = try await pipeline.translate(
+            // S1: partial outcome — a segment that fails mid-run keeps the
+            // finished part on screen instead of throwing it all away.
+            let outcome = try await pipeline.translatePartial(
                 segments: parts,
                 profile: profile,
                 apiKey: apiKey,
@@ -197,7 +216,11 @@ struct PhotoView: View {
                 partials[index] = partial
                 translation = partials.joined(separator: "\n")
             }
+            let results = outcome.results
             translation = results.map(\.translation).joined(separator: "\n")
+            if let failedIndex = outcome.failedSegmentIndex, let error = outcome.error {
+                errorMessage = "第 \(failedIndex + 1) 段翻译失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)（已译部分已保留）"
+            }
             // F1: one history row per model that actually translated —
             // booking the mixed total under the primary model priced
             // Qwen-MT fallback tokens at DeepSeek rates.
@@ -214,13 +237,18 @@ struct PhotoView: View {
                     model: model,
                     action: .translate,
                     targetLanguage: target,
-                    status: pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success",
+                    status: outcome.isComplete
+                        ? (pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success")
+                        : "partial · 第 \(outcome.failedSegmentIndex! + 1) 段失败",
                     promptTokens: usage["prompt_tokens"] ?? 0,
                     completionTokens: usage["completion_tokens"] ?? 0,
                     totalTokens: usage["total_tokens"] ?? 0
                 ))
             }
             try? modelContext.save()
+        } catch is CancellationError {
+            // S24: cancelled via 取消 — finished segments stay on
+            // screen, no error message.
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }

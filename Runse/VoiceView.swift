@@ -40,6 +40,15 @@ struct VoiceView: View {
     // they keep running after the page is left.
     @State private var transcriptTask: Task<Void, Never>?
     @State private var audioFeedTask: Task<Void, Never>?
+    // S24: stored handle for the stop/translate run — the 取消
+    // button (shown while translating) cancels it.
+    @State private var stopTask: Task<Void, Never>?
+    /// S14: one streaming TTS connection reused across sentences
+    /// (the client serves many sessions per connection); dropped on
+    /// error so a broken socket does not poison later sentences, and
+    /// on disappear / config change.
+    @State private var streamingTTSClient: VolcanoStreamingTTSClient?
+    @State private var playbackPollTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
@@ -79,14 +88,23 @@ struct VoiceView: View {
                             .disabled(phase != .idle && phase != .done)
 
                             Button {
-                                Task { await stopListening() }
+                                stopTask = Task { await stopListening() }
                             } label: {
                                 Label("结束", systemImage: "stop")
                             }
                             .buttonStyle(.bordered)
                             .disabled(phase != .listening)
+
+                            if phase == .translating {
+                                Button {
+                                    stopTask?.cancel()
+                                } label: {
+                                    Label("取消", systemImage: "xmark.circle")
+                                }
+                                .buttonStyle(.bordered)
+                            }
                         }
-                        if phase == .listening {
+                        if phase == .listening || phase == .translating {
                             ProgressView()
                         }
                     }
@@ -195,12 +213,26 @@ struct VoiceView: View {
                 configChecked = true
                 hasMyVoice = await QwenVoiceStore.loadVoiceID() != nil
             }
+            // S15: refresh on every appear — after cloning a voice in
+            // MyVoiceView and coming back, the toggle used to stay
+            // disabled until the tab was re-entered.
+            .onAppear {
+                Task { hasMyVoice = await QwenVoiceStore.loadVoiceID() != nil }
+            }
             .onDisappear {
                 // N6: leaving the page must stop the mic / ASR socket,
                 // or recording keeps uploading with no UI and the mic
                 // indicator stays on.
                 if phase == .listening {
                     Task { await stopListening() }
+                }
+                // S14: drop the reused streaming TTS connection too.
+                playbackPollTask?.cancel()
+                playbackPollTask = nil
+                isPlaying = false
+                if let client = streamingTTSClient {
+                    streamingTTSClient = nil
+                    Task { await client.disconnect() }
                 }
             }
         }
@@ -221,6 +253,11 @@ struct VoiceView: View {
             config = VolcanoVoiceConfig(appID: trimmedAppID, accessToken: trimmedToken)
             tokenField = ""
             configMessage = "已保存到钥匙串。"
+            // S14: the stored streaming client holds the old config.
+            if let client = streamingTTSClient {
+                streamingTTSClient = nil
+                await client.disconnect()
+            }
         } catch {
             configMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -232,6 +269,11 @@ struct VoiceView: View {
         config = nil
         appIDField = ""
         tokenField = ""
+        // S14: the stored streaming client holds the old config.
+        if let client = streamingTTSClient {
+            streamingTTSClient = nil
+            await client.disconnect()
+        }
     }
 
     @MainActor
@@ -274,6 +316,12 @@ struct VoiceView: View {
 
     @MainActor
     private func stopListening() async {
+        // S24: a long translation must not let the screen lock.
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer {
+            stopTask = nil
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
         transcriptTask?.cancel()
         transcriptTask = nil
         audioFeedTask?.cancel()
@@ -296,6 +344,10 @@ struct VoiceView: View {
             }
             try await translateAndSpeak(finalText)
             phase = .done
+        } catch is CancellationError {
+            // S24: cancelled via 取消 — the partial translation stays
+            // on screen, no error message.
+            phase = .done
         } catch {
             phase = .done
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -312,7 +364,9 @@ struct VoiceView: View {
         let parts = TextSegmenter.segments(for: text, maxChars: TextSegmenter.maxChars(for: profile))
         var partials = Array(repeating: "", count: parts.count)
         let fallback = profile.isQwenMT ? nil : await QwenMTBackup.resolve()
-        let results = try await pipeline.translate(
+        // S1: partial outcome — a segment that fails mid-run keeps the
+        // finished part on screen instead of throwing it all away.
+        let outcome = try await pipeline.translatePartial(
             segments: parts,
             profile: profile,
             apiKey: apiKey,
@@ -326,7 +380,11 @@ struct VoiceView: View {
             partials[index] = partial
             translation = partials.joined(separator: "\n")
         }
+        let results = outcome.results
         translation = results.map(\.translation).joined(separator: "\n")
+        if let failedIndex = outcome.failedSegmentIndex, let error = outcome.error {
+            errorMessage = "第 \(failedIndex + 1) 段翻译失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)（已译部分已保留）"
+        }
         // F1: one history row per model that actually translated —
         // booking the mixed total under the primary model priced
         // Qwen-MT fallback tokens at DeepSeek rates.
@@ -343,7 +401,9 @@ struct VoiceView: View {
                 model: model,
                 action: .translate,
                 targetLanguage: target,
-                status: pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success",
+                status: outcome.isComplete
+                    ? (pipeline.lastFallbackUsed ? "success · 部分段落由 Qwen-MT 备用完成" : "success")
+                    : "partial · 第 \(outcome.failedSegmentIndex! + 1) 段失败",
                 promptTokens: usage["prompt_tokens"] ?? 0,
                 completionTokens: usage["completion_tokens"] ?? 0,
                 totalTokens: usage["total_tokens"] ?? 0
@@ -356,11 +416,18 @@ struct VoiceView: View {
         if let config {
             do {
                 try await speakStreaming(translation, config: config)
+            } catch is CancellationError {
+                // S24: a cancel during TTS must propagate to
+                // stopListening, not fall through to the async
+                // fallback and end as a spurious "synthesis failed".
+                throw error
             } catch {
                 do {
                     let audio = try await VolcanoTTSClient(config: config).synthesize(text: translation, speaker: speakerID, speechRate: speechRate)
                     lastAudio = audio
                     playTranslation()
+                } catch is CancellationError {
+                    throw error
                 } catch {
                     errorMessage = "译文已出，但语音合成失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
                 }
@@ -386,17 +453,65 @@ struct VoiceView: View {
             playTranslation()
             return
         }
-        let client = VolcanoStreamingTTSClient(config: config)
-        try await client.connect()
-        defer { Task { await client.disconnect() } }
+        // S14: reuse the page-level streaming connection instead of
+        // a fresh connect per sentence.
+        let client = try await sharedStreamingTTSClient(config: config)
         try streamingPlayer.start()
         isPlaying = true
-        try await client.synthesize(text: text, speaker: speakerID, speechRate: speechRate) { pcm in
-            streamingPlayer.enqueue(pcm)
+        do {
+            try await client.synthesize(text: text, speaker: speakerID, speechRate: speechRate) { pcm in
+                streamingPlayer.enqueue(pcm)
+            }
+        } catch is CancellationError {
+            // S24: cancelling must not drop the shared connection —
+            // it is still healthy, only the sentence was cancelled.
+            // But the "正在播放" flag was set before synthesize, and
+            // trackPlaybackEnd() only runs on the success path — reset
+            // it here or it stays stuck after a cancel.
+            isPlaying = false
+            throw error
+        } catch {
+            // A broken connection must not poison later sentences.
+            await dropStreamingTTSClient()
+            isPlaying = false
+            throw error
         }
-        Task {
-            try? await Task.sleep(for: .seconds(10))
-            await MainActor.run { isPlaying = streamingPlayer.isPlaying }
+        trackPlaybackEnd()
+    }
+
+    /// S14: one streaming TTS connection per page — the client can
+    /// serve many sessions, so a fresh connect per sentence paid a
+    /// handshake + delay every time.
+    private func sharedStreamingTTSClient(config: VolcanoVoiceConfig) async throws -> VolcanoStreamingTTSClient {
+        if let existing = streamingTTSClient { return existing }
+        let created = VolcanoStreamingTTSClient(config: config)
+        try await created.connect()
+        streamingTTSClient = created
+        return created
+    }
+
+    private func dropStreamingTTSClient() async {
+        if let client = streamingTTSClient {
+            streamingTTSClient = nil
+            await client.disconnect()
+        }
+    }
+
+    /// S14: poll the real playback state instead of a hardcoded 10 s
+    /// sleep — long audio used to leave "正在播放" stuck on, short
+    /// audio waited the full 10 s to clear.
+    private func trackPlaybackEnd() {
+        playbackPollTask?.cancel()
+        playbackPollTask = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            while !Task.isCancelled {
+                let playing = streamingPlayer.isPlaying || player.isPlaying
+                if !playing { break }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            if !Task.isCancelled {
+                isPlaying = false
+            }
         }
     }
 
@@ -407,10 +522,7 @@ struct VoiceView: View {
             do {
                 try player.play(data: lastAudio)
                 isPlaying = true
-                Task {
-                    try? await Task.sleep(for: .seconds(10))
-                    await MainActor.run { isPlaying = player.isPlaying }
-                }
+                trackPlaybackEnd()
             } catch {
                 errorMessage = "播放失败：\(error.localizedDescription)"
             }
@@ -418,7 +530,13 @@ struct VoiceView: View {
         }
         guard !translation.isEmpty, let config else { return }
         Task {
-            try? await speakStreaming(translation, config: config)
+            // S14: a failed replay used to be swallowed silently —
+            // no sound and no message.
+            do {
+                try await speakStreaming(translation, config: config)
+            } catch {
+                errorMessage = "播放失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+            }
         }
     }
 }

@@ -49,6 +49,14 @@ public enum TranslationRequestResolver {
             stored = await DashScopeStore.loadKey()
         } else {
             stored = await ProviderKeyStore.loadKey(profileID: profile.id)
+            // S13: one DeepSeek key covers both DeepSeek profiles —
+            // a key saved under either id works for the other.
+            if stored == nil, profile.isDeepSeek {
+                let otherID = profile.id == RunseConstants.defaultProfileID
+                    ? RunseConstants.deepSeekProProfileID
+                    : RunseConstants.defaultProfileID
+                stored = await ProviderKeyStore.loadKey(profileID: otherID)
+            }
         }
         guard let stored else {
             throw LLMProviderError.missingAPIKey

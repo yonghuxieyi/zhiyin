@@ -33,6 +33,7 @@ struct PDFView: View {
     @State private var dualCheckNote: String?
     @State private var exportURL: URL?
     @State private var translationTask: Task<Void, Never>?
+    @State private var loadTask: Task<Void, Never>?
 
     /// The dual-model switch reads/writes SettingsStore directly
     /// instead of a `@State` snapshot: the old snapshot was
@@ -91,6 +92,7 @@ struct PDFView: View {
                     if isWorking {
                         Button {
                             translationTask?.cancel()
+                            loadTask?.cancel()
                         } label: {
                             Label("取消", systemImage: "xmark.circle")
                         }
@@ -159,7 +161,9 @@ struct PDFView: View {
         .fileImporter(isPresented: $showingPicker, allowedContentTypes: [.pdf]) { result in
             switch result {
             case .success(let url):
-                Task { await loadDocument(url) }
+                // S2: keep the handle so extraction can be cancelled
+                // from the 取消 button (same button as translation).
+                loadTask = Task { await loadDocument(url) }
             case .failure(let error):
                 errorMessage = error.localizedDescription
             }
@@ -174,6 +178,14 @@ struct PDFView: View {
         }
         defer { url.stopAccessingSecurityScopedResource() }
         do {
+            // S8: size guard before reading — a multi-hundred MB
+            // scanned PDF must not be loaded whole into memory.
+            if let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let size = attributes[.size] as? Int64,
+               size > PDFProgressStore.maxImportBytes {
+                errorMessage = "这个 PDF 有 \(size / 1024 / 1024) MB，超过 200 MB 上限，手机上翻不动，请先拆小再导入。"
+                return
+            }
             let data = try Data(contentsOf: url)
             guard let document = PDFDocument(data: data) else {
                 errorMessage = "这不是有效的 PDF。"
@@ -181,7 +193,7 @@ struct PDFView: View {
             }
             self.document = document
             fileName = url.lastPathComponent
-            documentHash = PDFProgressStore.documentHash(data)
+            documentHash = (try? PDFProgressStore.documentHash(of: url)) ?? PDFProgressStore.documentHash(data)
             translated = []
             exportURL = nil
             errorMessage = nil
@@ -190,7 +202,20 @@ struct PDFView: View {
             dualCheckNote = nil
             isWorking = true
             progress = "正在提取文字…"
-            pages = await PDFTranslation.extractPages(from: document)
+            // S2: extraction is cancellable (per-page check inside);
+            // a cancel leaves the document half-loaded, so clear the
+            // partial pages instead of showing a torn document.
+            do {
+                pages = try await PDFTranslation.extractPages(from: document)
+            } catch is CancellationError {
+                pages = []
+                self.document = nil
+                fileName = ""
+                documentHash = nil
+                isWorking = false
+                progress = ""
+                return
+            }
             isWorking = false
             progress = ""
             // M12: resume from the breakpoint — if this document was
@@ -296,6 +321,10 @@ struct PDFView: View {
             var didDualCheck = false
             var dualCheckAttempted = false
             var failedParagraphs = 0
+            // S7: `pipeline.lastFallbackUsed` resets on every
+            // translatePartial call, so it only ever reflects the
+            // LAST segment — accumulate across the whole run.
+            var didUseFallback = false
             // Already-translated pages (from a resume) are reused;
             // only missing or failed paragraphs are translated.
             var allTranslated = Dictionary(uniqueKeysWithValues: translated.map { ($0.index, $0) })
@@ -346,6 +375,7 @@ struct PDFView: View {
                             entry.completion += usage["completion_tokens"] ?? 0
                             totalUsageByModel[model] = entry
                         }
+                        didUseFallback = didUseFallback || pipeline.lastFallbackUsed
                         var translation = outcome.results.map(\.translation).joined(separator: "\n")
                         if outcome.failedSegmentIndex != nil {
                             // Part of the paragraph translated: keep
@@ -392,15 +422,22 @@ struct PDFView: View {
                 // Persist after every page, so a crash or cancel
                 // mid-run still leaves a resumable breakpoint.
                 persistProgress()
-                rebuildExport()
+                // S7: rebuilding the export from scratch after every
+                // page is O(n²) — throttle to every 5th page; the
+                // final rebuild below (and on cancel/error) covers
+                // the tail.
+                if page.index % 5 == 4 {
+                    rebuildExport()
+                }
             }
+            rebuildExport()
             if dualModelCheck, dualCheckAttempted, !didDualCheck {
                 dualCheckNote = "双模型校对没生效：第二模型不可用（缺 Key 或调用失败），本次只用了主模型译文。"
             }
             if failedParagraphs > 0 {
                 partialNote = "\(failedParagraphs) 段翻译失败，已保留原文并可导出；点“继续翻译”可只重试失败的段落。"
             }
-            if pipeline.lastFallbackUsed {
+            if didUseFallback {
                 let fallbackNote = "部分段落由 Qwen-MT 备用完成（主模型出错）。"
                 partialNote = [partialNote, fallbackNote].compactMap { $0 }.joined(separator: " ")
             }
@@ -436,6 +473,9 @@ struct PDFView: View {
             // result — it is not an error and not a failure to report.
             if error is CancellationError {
                 progress = ""
+                // S7: the export is throttled during the run, so a
+                // cancel must rebuild once to cover the finished pages.
+                rebuildExport()
                 if !translated.isEmpty {
                     // E4: keep the untranslated-pages note visible —
                     // the export still contains those pages as

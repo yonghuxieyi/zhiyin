@@ -18,6 +18,10 @@ struct TranslateView: View {
     @State private var direction: TranslationDirection = .auto
     @State private var segments: [SegmentRow] = []
     @State private var isTranslating = false
+    // S24: stored handle for the run — the 取消 button cancels it
+    // (translatePartial rethrows CancellationError, so the run
+    // actually stops; finished segments stay on screen).
+    @State private var translationTask: Task<Void, Never>?
     @State private var errorMessage: String?
     @State private var didCopy = false
     @State private var useGlossary = true
@@ -104,7 +108,7 @@ struct TranslateView: View {
 
                 HStack {
                     Button {
-                        Task { await runTranslation() }
+                        translationTask = Task { await runTranslation() }
                     } label: {
                         if isTranslating {
                             ProgressView()
@@ -113,6 +117,14 @@ struct TranslateView: View {
                         }
                     }
                     .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isTranslating)
+
+                    if isTranslating {
+                        Button {
+                            translationTask?.cancel()
+                        } label: {
+                            Label("取消", systemImage: "xmark.circle")
+                        }
+                    }
 
                     Spacer()
 
@@ -219,7 +231,13 @@ struct TranslateView: View {
         didCopy = false
         fallbackUsed = false
         savedVocabIDs = []
-        defer { isTranslating = false }
+        // S24: a long translation must not let the screen lock.
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer {
+            isTranslating = false
+            translationTask = nil
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
         do {
             let request = try await TranslationRequestResolver.resolve(
                 profiles: profiles, templates: templates,
@@ -287,6 +305,9 @@ struct TranslateView: View {
                 ))
             }
             try? modelContext.save()
+        } catch is CancellationError {
+            // S24: cancelled via 取消 — finished segments stay on
+            // screen, no error message.
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }

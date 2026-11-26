@@ -36,24 +36,34 @@ public enum VisionTextRecognizer {
     /// landscape at the pixel level — so callers must pass the
     /// image's orientation (or Vision reads sideways text). PDF
     /// thumbnails are already upright, so they use the default.
+    ///
+    /// S2: `VNImageRequestHandler.perform` is synchronous and takes
+    /// hundreds of milliseconds to 1–2 s in accurate mode, so it
+    /// runs in a detached task — callers on the main actor would
+    /// otherwise stall the UI on every photo/scan. The request and
+    /// handler live and die inside the detached task; only the
+    /// recognized strings and boxes (Sendable values) cross back.
     public static func recognizeText(in image: CGImage, orientation: CGImagePropertyOrientation = .up) async throws -> [Line] {
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.recognitionLanguages = ["zh-Hans", "en-US"]
-        request.usesLanguageCorrection = true
-        let handler = VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:])
-        try handler.perform([request])
-        guard let observations = request.results, !observations.isEmpty else {
-            throw RecognizerError.noTextFound
-        }
-        let lines = observations.compactMap { observation -> Line? in
-            guard let text = observation.topCandidates(1).first?.string,
-                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-            // Vision boxes use a bottom-left origin; flip to top-left.
-            let box = observation.boundingBox
-            let flipped = CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
-            return Line(text: text, boundingBox: flipped)
-        }
+        let found: [(String, CGRect)] = try await Task.detached {
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.recognitionLanguages = ["zh-Hans", "en-US"]
+            request.usesLanguageCorrection = true
+            let handler = VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:])
+            try handler.perform([request])
+            guard let observations = request.results, !observations.isEmpty else {
+                throw RecognizerError.noTextFound
+            }
+            return observations.compactMap { observation -> (String, CGRect)? in
+                guard let text = observation.topCandidates(1).first?.string,
+                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                // Vision boxes use a bottom-left origin; flip to top-left.
+                let box = observation.boundingBox
+                let flipped = CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+                return (text, flipped)
+            }
+        }.value
+        let lines = found.map { Line(text: $0.0, boundingBox: $0.1) }
         return lines.sorted { lhs, rhs in
             if abs(lhs.boundingBox.minY - rhs.boundingBox.minY) > 0.02 {
                 return lhs.boundingBox.minY < rhs.boundingBox.minY

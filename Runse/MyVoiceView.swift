@@ -15,6 +15,10 @@ struct MyVoiceView: View {
     @State private var workspaceID = ""
     @State private var hasDashScopeKey = false
     @State private var isRecording = false
+    /// S18: starting takes an await (permission + session), and a
+    /// second tap in that window used to start a second recorder
+    /// and a second timer. Guard + button disable cover the window.
+    @State private var isStartingRecording = false
     @State private var recordedSeconds = 0
     @State private var recordedURL: URL?
     @State private var isWorking = false
@@ -69,6 +73,20 @@ struct MyVoiceView: View {
                     }
                 }
                 .disabled(workspaceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                // S18: a mistyped workspace ID had no way back — add
+                // a clear path (back to the default domain).
+                Button("清除业务空间 ID", role: .destructive) {
+                    Task {
+                        do {
+                            try await DashScopeStore.clearWorkspaceID()
+                            workspaceID = ""
+                            statusMessage = "业务空间 ID 已清除，改走默认域名。"
+                            errorMessage = nil
+                        } catch {
+                            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                        }
+                    }
+                }
                 Text("在百炼控制台“业务空间详情”页查看。不填也能用，走旧域名。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -85,7 +103,7 @@ struct MyVoiceView: View {
                         Label(isRecording ? "停止录音" : "开始录音", systemImage: isRecording ? "stop.circle" : "mic.circle")
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(isWorking)
+                    .disabled(isWorking || isStartingRecording)
                     Spacer()
                     if isRecording || recordedSeconds > 0 {
                         Text("\(recordedSeconds) 秒")
@@ -153,9 +171,22 @@ struct MyVoiceView: View {
             isRecording = false
             return
         }
+        // S18: one start at a time — the await below (permission +
+        // session activation) used to admit a second recorder.
+        guard !isStartingRecording else { return }
+        isStartingRecording = true
+        defer { isStartingRecording = false }
         errorMessage = nil
         statusMessage = nil
         testAudio = nil
+        // S18: a previous recording's WAV is abandoned once a new
+        // one starts — delete it instead of letting samples pile up
+        // in tmp.
+        if let oldURL = recordedURL {
+            try? FileManager.default.removeItem(at: oldURL)
+            recordedURL = nil
+            recordedSeconds = 0
+        }
         do {
             let ticks = try await recorder.start()
             recordedSeconds = 0
@@ -196,6 +227,12 @@ struct MyVoiceView: View {
             try await QwenVoiceStore.saveVoiceID(id)
             voiceID = id
             statusMessage = "音色已创建。"
+            // S18: the voice sample is uploaded — delete the local
+            // WAV instead of letting samples pile up in tmp. Only
+            // on success: a failure keeps the file for a retry.
+            try? FileManager.default.removeItem(at: url)
+            recordedURL = nil
+            recordedSeconds = 0
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -298,7 +335,14 @@ private final class MyVoiceRecorder: NSObject, AVAudioRecorderDelegate {
         recorder.delegate = self
         self.recorder = recorder
         seconds = 0
-        recorder.record()
+        // S18: record() returns false when the recorder cannot start
+        // (no input, broken session) — the old code ignored it and
+        // the timer ran anyway, sending an empty/broken WAV to the
+        // clone call 30 s later.
+        guard recorder.record() else {
+            self.recorder = nil
+            throw QwenVoiceError.recordingFailed("无输入或音频会话异常")
+        }
         let stream = AsyncStream<Int> { continuation in
             self.tickContinuation = continuation
             timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in

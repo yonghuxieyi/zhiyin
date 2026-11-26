@@ -115,25 +115,34 @@ public actor LiveInterpretClient {
             await cancel()
             throw ClientError.connectionFailed(error.localizedDescription)
         }
-        let deadline = Date().addingTimeInterval(10)
-        while !sessionStarted {
-            // D1: stop() during connection establishment must end
-            // this wait instead of letting start() return a stream
-            // for a socket that was just cancelled (the session
-            // would "revive" after the user stopped it).
-            if stopped {
-                await cancel()
-                throw ClientError.connectionFailed("同传已停止")
+        // S3: the 10 s wait must not leak the socket/receiveTask when
+        // the caller cancels mid-wait — Task.sleep throws
+        // CancellationError, which used to escape start() without
+        // anyone closing the socket.
+        do {
+            let deadline = Date().addingTimeInterval(10)
+            while !sessionStarted {
+                // D1: stop() during connection establishment must end
+                // this wait instead of letting start() return a stream
+                // for a socket that was just cancelled (the session
+                // would "revive" after the user stopped it).
+                if stopped {
+                    await cancel()
+                    throw ClientError.connectionFailed("同传已停止")
+                }
+                if let failure = sessionFailure {
+                    await cancel()
+                    throw ClientError.sessionFailed(failure)
+                }
+                if Date() > deadline {
+                    await cancel()
+                    throw ClientError.timedOut
+                }
+                try await Task.sleep(for: .milliseconds(50))
             }
-            if let failure = sessionFailure {
-                await cancel()
-                throw ClientError.sessionFailed(failure)
-            }
-            if Date() > deadline {
-                await cancel()
-                throw ClientError.timedOut
-            }
-            try await Task.sleep(for: .milliseconds(50))
+        } catch is CancellationError {
+            await cancel()
+            throw
         }
         // D1: the loop above exits when the session starts — but a
         // stop() that landed in the same instant must still win over

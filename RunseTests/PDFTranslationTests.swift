@@ -94,11 +94,11 @@ final class PDFTranslationTests: XCTestCase {
     /// line, page 2 has the same text once. Extraction must find a
     /// non-zero box for every line on its own page.
     @MainActor
-    func testExtractPagesFindsBoxesPerPage() async {
+    func testExtractPagesFindsBoxesPerPage() async throws {
         let data = makeTwoPagePDF()
         let document = PDFDocument(data: data)
         XCTAssertNotNil(document)
-        let pages = await PDFTranslation.extractPages(from: document!)
+        let pages = try await PDFTranslation.extractPages(from: document!)
         XCTAssertEqual(pages.count, 2)
         for content in pages {
             XCTAssertFalse(content.lines.isEmpty)

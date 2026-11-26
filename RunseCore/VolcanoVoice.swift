@@ -96,6 +96,17 @@ public enum VolcanoVoiceStore {
         return VolcanoVoiceConfig(appID: appID, accessToken: token)
     }
 
+    /// S6: throwing variant (see ProviderKeyStore.loadKeyThrowing) —
+    /// a keychain fault must read as a read failure, not as "voice
+    /// not configured".
+    public static func loadThrowing() async throws -> VolcanoVoiceConfig? {
+        let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
+        let appID = try await keychain.load(service: appIDService, account: account)
+        let token = try await keychain.load(service: accessTokenService, account: account)
+        guard let appID, let token, !appID.isEmpty, !token.isEmpty else { return nil }
+        return VolcanoVoiceConfig(appID: appID, accessToken: token)
+    }
+
     public static func save(_ config: VolcanoVoiceConfig) async throws {
         let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
         try await keychain.save(config.appID, service: appIDService, account: account)
@@ -156,8 +167,13 @@ public enum VolcanoFrame {
     /// number after the header when flags bit 0x1 is set (verified live
     /// 2026-11-25 on the ASR bigmodel_async endpoint); the sequence is
     /// returned for logging and skipped for the payload.
+    ///
+    /// S4: byte 0 must be `0x1n` (protocol version 1 in the high
+    /// nibble). A bad magic returns nil and the caller resyncs via
+    /// `resyncDropCount` instead of trusting a garbage header size
+    /// and waiting forever for a huge payload.
     public static func decodeFirst(from buffer: Data) -> (frame: DecodedFrame, consumed: Int)? {
-        guard buffer.count >= 4 else { return nil }
+        guard buffer.count >= 4, buffer[0] >> 4 == 0x1 else { return nil }
         let headerSize = Int(buffer[0] & 0x0F) * 4
         let flags = buffer[1] & 0x0F
         let hasSequence = (flags & 0x1) != 0
@@ -185,6 +201,19 @@ public enum VolcanoFrame {
         let payload = buffer.subdata(in: (sizeOffset + 4)..<total)
         return (DecodedFrame(type: type, flags: flags, isJSON: isJSON, event: event, sequence: sequence, payload: payload), total)
     }
+
+    /// S4: leading bytes that cannot start a frame, to drop before
+    /// decoding. A frame starts with byte `0x1n` (protocol version 1
+    /// in the high nibble); anything before the next such byte is
+    /// garbage from a lost alignment.
+    public static func resyncDropCount(in buffer: Data) -> Int {
+        var count = 0
+        while count < buffer.count {
+            if buffer[count] >> 4 == 0x1 { return count }
+            count += 1
+        }
+        return count
+    }
 }
 
 // MARK: - Shared WebSocket plumbing
@@ -201,24 +230,44 @@ actor VolcanoSocketReader {
     }
 
     /// Returns the next complete frame, or nil when the socket closes.
-    func nextFrame() async -> VolcanoFrame.DecodedFrame? {
+    /// S4: `timeout` (default 60 s) bounds a half-open socket — no
+    /// frame within the window is treated as a disconnect, so the
+    /// receive loop ends and hands back the transcript so far instead
+    /// of hanging forever with a leaked socket and Task. Garbage
+    /// bytes before the next frame start are dropped (resync) rather
+    /// than parsed as a huge payload.
+    func nextFrame(timeout: TimeInterval = 60) async -> VolcanoFrame.DecodedFrame? {
+        let socket = task
         while true {
+            let drop = VolcanoFrame.resyncDropCount(in: buffer)
+            if drop > 0 {
+                buffer.removeFirst(drop)
+                continue
+            }
             if let decoded = VolcanoFrame.decodeFirst(from: buffer) {
                 buffer.removeFirst(decoded.consumed)
                 return decoded.frame
             }
-            do {
-                let message = try await task.receive()
-                switch message {
-                case .data(let data):
-                    buffer.append(data)
-                case .string(let text):
-                    buffer.append(Data(text.utf8))
-                @unknown default:
-                    break
+            let received: URLSessionWebSocketTask.Message? = await withTaskGroup(of: URLSessionWebSocketTask.Message?.self) { group in
+                group.addTask {
+                    try? await socket.receive()
                 }
-            } catch {
-                return nil
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(timeout))
+                    return nil
+                }
+                let first = await group.next() ?? nil
+                group.cancelAll()
+                return first
+            }
+            guard let received else { return nil }
+            switch received {
+            case .data(let data):
+                buffer.append(data)
+            case .string(let text):
+                buffer.append(Data(text.utf8))
+            @unknown default:
+                break
             }
         }
     }
@@ -431,7 +480,14 @@ public actor VolcanoTTSClient {
         let audioURL = try await waitForAudio(taskID: taskID)
         guard let url = URL(string: audioURL) else { throw VolcanoVoiceError.invalidResponse }
         // The signed link expires in 1 hour; download it immediately.
-        let (data, _) = try await session.data(from: url)
+        // S5: verify the HTTP status — an expired/rejected link
+        // returns a 4xx error page with a non-empty body, which used
+        // to pass the !isEmpty check and come back as "audio" until
+        // AVAudioPlayer failed with an unrelated error.
+        let (data, downloadResponse) = try await session.data(from: url)
+        guard let downloadHTTP = downloadResponse as? HTTPURLResponse, (200..<300).contains(downloadHTTP.statusCode) else {
+            throw VolcanoVoiceError.connectionFailed("音频下载 HTTP \((downloadResponse as? HTTPURLResponse)?.statusCode ?? -1)")
+        }
         guard !data.isEmpty else { throw VolcanoVoiceError.invalidResponse }
         return data
     }

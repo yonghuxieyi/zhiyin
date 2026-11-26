@@ -29,12 +29,21 @@ public final class KeychainStore: SecretStore {
         self.accessGroup = accessGroup
     }
 
+    /// S6: update-in-place instead of delete-then-add. The old
+    /// sequence had a window where the key did not exist at all
+    /// (killed app or interleaved concurrent save = lost key).
+    /// `SecItemUpdate` on a missing item returns
+    /// `errSecItemNotFound`, which is when we fall back to Add.
     public func save(_ value: String, service: String, account: String) async throws {
         let data = Data(value.utf8)
-        var query = baseQuery(service: service, account: account)
-        SecItemDelete(query as CFDictionary)
-        query[kSecValueData as String] = data
-        let status = SecItemAdd(query as CFDictionary, nil)
+        let query = baseQuery(service: service, account: account)
+        let attributes: [String: Any] = [kSecValueData as String: data]
+        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if updateStatus == errSecSuccess { return }
+        guard updateStatus == errSecItemNotFound else { throw KeychainError.unexpectedStatus(updateStatus) }
+        var addQuery = query
+        addQuery[kSecValueData as String] = data
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
         guard status == errSecSuccess else { throw KeychainError.unexpectedStatus(status) }
     }
 
@@ -88,6 +97,19 @@ public enum ProviderKeyStore {
     public static func loadKey(profileID: String) async -> String? {
         let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
         guard let key = try? await keychain.load(service: KeychainStore.providerAPIKeyService, account: profileID),
+              !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return key
+    }
+
+    /// S6: throwing variant — `load` already returns nil only for
+    /// `errSecItemNotFound` and throws on a real keychain failure,
+    /// but the `try?` in `loadKey` collapses that into "not
+    /// configured". Callers that show a configured/not-configured
+    /// state use this so a keychain fault reads "钥匙串读取失败"
+    /// instead of "未配置".
+    public static func loadKeyThrowing(profileID: String) async throws -> String? {
+        let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
+        guard let key = try await keychain.load(service: KeychainStore.providerAPIKeyService, account: profileID),
               !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return key
     }

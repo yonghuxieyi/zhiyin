@@ -35,12 +35,20 @@ public enum QwenVoiceError: Error, LocalizedError, Equatable {
     case notConfigured(String)
     case serverError(String)
     case invalidResponse
+    /// S18: the local recorder failed to start (no input, broken
+    /// audio session) — distinct from a server error.
+    case recordingFailed(String)
+    /// S20: a workspace ID with characters outside letters, digits
+    /// and "-" must never be interpolated into a request host.
+    case invalidWorkspaceID
 
     public var errorDescription: String? {
         switch self {
         case .notConfigured(let what): "未配置\(what)。"
         case .serverError(let message): "百炼返回错误：\(message)"
         case .invalidResponse: "百炼返回了无法解析的结果。"
+        case .recordingFailed(let message): "录音启动失败：\(message)"
+        case .invalidWorkspaceID: "业务空间 ID 只能用字母、数字和“-”，请检查后重新输入。"
         }
     }
 }
@@ -52,17 +60,30 @@ public enum QwenAudio {
 
     /// Workspace-specific base URL when the user saved a workspace ID,
     /// otherwise the legacy domain (still functional per the docs).
+    /// S20: the ID is interpolated into the host, so it must be
+    /// validated — a `/` or `@` in it would change the host and send
+    /// the Bearer key somewhere unintended. `customizationURL` /
+    /// `synthesizerURL` return nil for an invalid ID (fail closed);
+    /// `saveWorkspaceID` rejects it at entry.
+    public static func isValidWorkspaceID(_ id: String) -> Bool {
+        guard !id.isEmpty, id.count <= 64 else { return false }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+        return id.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
     public static func baseURL(workspaceID: String?) -> String {
-        guard let workspaceID, !workspaceID.isEmpty else { return legacyBaseURL }
+        guard let workspaceID, !workspaceID.isEmpty, isValidWorkspaceID(workspaceID) else { return legacyBaseURL }
         return "https://\(workspaceID).cn-beijing.maas.aliyuncs.com"
     }
 
     public static func customizationURL(workspaceID: String?) -> URL? {
-        URL(string: baseURL(workspaceID: workspaceID) + "/api/v1/services/audio/tts/customization")
+        if let workspaceID, !workspaceID.isEmpty, !isValidWorkspaceID(workspaceID) { return nil }
+        return URL(string: baseURL(workspaceID: workspaceID) + "/api/v1/services/audio/tts/customization")
     }
 
     public static func synthesizerURL(workspaceID: String?) -> URL? {
-        URL(string: baseURL(workspaceID: workspaceID) + "/api/v1/services/audio/tts/SpeechSynthesizer")
+        if let workspaceID, !workspaceID.isEmpty, !isValidWorkspaceID(workspaceID) { return nil }
+        return URL(string: baseURL(workspaceID: workspaceID) + "/api/v1/services/audio/tts/SpeechSynthesizer")
     }
 }
 
@@ -192,7 +213,14 @@ public enum QwenVoiceClone {
             }
             throw QwenVoiceError.invalidResponse
         }
-        let (audioData, _) = try await session.data(from: audioURL)
+        // S5: verify the HTTP status — an expired/rejected signed
+        // link returns a 4xx error page with a non-empty body, which
+        // used to pass the !isEmpty check and come back as "audio"
+        // until AVAudioPlayer failed with an unrelated error.
+        let (audioData, audioResponse) = try await session.data(from: audioURL)
+        guard let audioHTTP = audioResponse as? HTTPURLResponse, (200..<300).contains(audioHTTP.statusCode) else {
+            throw QwenVoiceError.serverError("音频下载 HTTP \((audioResponse as? HTTPURLResponse)?.statusCode ?? -1)")
+        }
         guard !audioData.isEmpty else { throw QwenVoiceError.invalidResponse }
         return audioData
     }

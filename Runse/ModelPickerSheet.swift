@@ -13,6 +13,7 @@ struct ModelPickerSheet: View {
     @StateObject private var connectivity = ConnectivityMonitor()
     @State private var voiceConfigured = false
     @State private var qwenConfigured = false
+    @State private var deepSeekConfigured = false
     @State private var searchText = ""
 
     private let settings = SettingsStore()
@@ -54,12 +55,15 @@ struct ModelPickerSheet: View {
                 let config = await VolcanoVoiceStore.load()
                 voiceConfigured = config != nil
                 qwenConfigured = await DashScopeStore.hasKey()
+                // S13: one DeepSeek key covers both DeepSeek options.
+                deepSeekConfigured = await ProviderKeyStore.hasKey(profileID: RunseConstants.defaultProfileID)
+                    || await ProviderKeyStore.hasKey(profileID: RunseConstants.deepSeekProProfileID)
             }
         }
     }
 
     private func filteredOptions(for group: ModelGroup) -> [ModelOption] {
-        let options = ModelCatalog.options(voiceConfigured: voiceConfigured, qwenConfigured: qwenConfigured)
+        let options = ModelCatalog.options(voiceConfigured: voiceConfigured, qwenConfigured: qwenConfigured, deepSeekConfigured: deepSeekConfigured)
             .filter { $0.group == group }
         guard !searchText.isEmpty else { return options }
         return options.filter {

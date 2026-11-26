@@ -81,6 +81,7 @@ struct InterpretationView: View {
             .task {
                 config = await VolcanoVoiceStore.load()
                 configChecked = true
+                engine.refreshQuota()
             }
             .sheet(item: $selectedSession) { session in
                 InterpretationSessionDetailView(session: session)
@@ -211,6 +212,17 @@ struct InterpretationView: View {
                     .font(.footnote)
                 }
             }
+
+            // S10: stopping takes a while (disconnects + tail
+            // translation) — show the step instead of a frozen UI.
+            if engine.isStopping {
+                HStack {
+                    ProgressView()
+                    Text(engine.stopProgress ?? "正在结束会话…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -227,6 +239,14 @@ struct InterpretationView: View {
     }
 
     // MARK: - Quota
+
+    /// S12: "yyyy-MM-dd" for the balance-as-of date.
+    private static func balanceDateString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
 
     private var quotaSection: some View {
         Section("额度") {
@@ -258,11 +278,16 @@ struct InterpretationView: View {
             HStack {
                 Text("账户余额")
                 Spacer()
+                // S12: there is no console API to query the balance,
+                // so a missing value must read as unknown — the old
+                // hardcoded "¥2.36（2026-11-25 记录）" looked like a
+                // live figure and only got staler. The value can be
+                // updated by hand in Settings.
                 if let balance = quota.balanceYuan {
-                    Text("¥" + String(format: "%.2f", balance))
+                    Text("¥" + String(format: "%.2f", balance) + (quota.balanceAsOf.map { "（截至 " + Self.balanceDateString($0) + "）" } ?? ""))
                         .foregroundStyle(balance < 5 ? .orange : .secondary)
                 } else {
-                    Text("¥2.36（2026-11-25 记录）")
+                    Text("未知（2026-11-25 最后一次记录 ¥2.36）")
                         .foregroundStyle(.secondary)
                 }
             }

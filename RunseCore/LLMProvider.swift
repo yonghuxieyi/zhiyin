@@ -150,20 +150,15 @@ public final class HTTPProviderClient: LLMProviderClient {
     }
 
     @MainActor private func performAttempt(request: LLMRequest, onDelta: (@MainActor (String) -> Void)?) async throws -> LLMResponse {
-        switch profile.kind {
-        case .openAICompatible:
-            return try await streamOpenAIChat(request: request, onDelta: onDelta)
-        case .anthropicMessages, .anthropicCompatible:
-            // Removed with the SwiftAnthropic dependency: no preset and
-            // no UI can create an Anthropic-kind profile, so this path
-            // was unreachable dead code. Kept as an explicit error
-            // rather than silently mapping it to another API shape.
-            throw LLMProviderError.unsupported("该模型类型（Anthropic）暂未接入，请换 DeepSeek 或 Qwen-MT。")
-        case .openAIResponses:
-            // The Responses API has a substantially different schema. Keep the
-            // existing one-shot path here; none of the bundled presets use it.
-            return try await legacyOneShot(request: request)
+        // S17: only OpenAI-compatible profiles are served. The
+        // Anthropic and Responses branches were dead code (no preset
+        // or UI can create those kinds, and the Responses one-shot
+        // path had no caller left) — they now fail explicitly
+        // instead of pretending to work.
+        guard profile.kind == .openAICompatible else {
+            throw LLMProviderError.unsupported("该模型类型暂未接入，请换 DeepSeek 或 Qwen-MT。")
         }
+        return try await streamOpenAIChat(request: request, onDelta: onDelta)
     }
 
     @MainActor private func streamOpenAIChat(request: LLMRequest, onDelta: (@MainActor (String) -> Void)?) async throws -> LLMResponse {
@@ -251,23 +246,6 @@ public final class HTTPProviderClient: LLMProviderClient {
         return try finalize(content: content, reasoning: reasoning, model: model, responseID: responseID, usage: usage)
     }
 
-    @MainActor private func legacyOneShot(request: LLMRequest) async throws -> LLMResponse {
-        let urlRequest = try ProviderRequestFactory.urlRequest(profile: profile, apiKey: apiKey, request: request)
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: urlRequest)
-        } catch let error as URLError where error.code == .timedOut {
-            throw LLMProviderError.timeout
-        }
-        guard let http = response as? HTTPURLResponse else { throw LLMProviderError.malformedJSON }
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw LLMProviderError.invalidStatus(http.statusCode, body, RetrySupport.retryAfterSeconds(from: http))
-        }
-        return try ProviderResponseParser.parse(data: data, kind: profile.kind)
-    }
-
     private func finalize(content: String, reasoning: String, model: String?, responseID: String?, usage: [String: Int]) throws -> LLMResponse {
         // M4: when `content` is empty, never return the reasoning /
         // thinking text as the translation — the user would see the
@@ -348,14 +326,21 @@ public enum ProviderRequestFactory {
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        // S17: extra headers must never override the real
+        // Authorization or Content-Type — a stored
+        // {"Authorization": ...} would otherwise replace the true Key.
         for (key, value) in extraHeaders(from: profile.extraHeadersJSON) {
+            let lower = key.lowercased()
+            guard lower != "authorization", lower != "content-type" else { continue }
             urlRequest.setValue(value, forHTTPHeaderField: key)
         }
-        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body(profile: profile, request: request), options: [])
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: try body(profile: profile, request: request), options: [])
         return urlRequest
     }
 
-    public static func body(profile: ProviderProfile, request: LLMRequest) -> [String: Any] {
+    /// S20: throws — the Qwen-MT target language is validated here
+    /// (unknown languages throw instead of silently becoming English).
+    public static func body(profile: ProviderProfile, request: LLMRequest) throws -> [String: Any] {
         // Thinking is disabled explicitly for DeepSeek: with thinking on,
         // DeepSeek ignores `temperature`, and reasoning models can burn
         // their entire output budget on chain-of-thought, returning empty
@@ -363,67 +348,61 @@ public enum ProviderRequestFactory {
         // response parser no longer falls back to `reasoning_content` /
         // Anthropic `thinking` blocks — empty content throws emptyOutput
         // instead of showing chain-of-thought as a translation.
-        switch profile.kind {
-        case .openAIResponses:
+        //
+        // S17: only OpenAI-compatible profiles are served — the
+        // Anthropic and Responses body shapes were dead code (no
+        // preset or UI can create those kinds, and performAttempt
+        // rejects them before a body is ever built). A non-compatible
+        // kind here gets a minimal OpenAI-shaped body; it is
+        // unreachable in production.
+        guard profile.kind == .openAICompatible else {
             return [
                 "model": request.model,
-                "input": [
-                    ["role": "system", "content": request.systemPrompt],
-                    ["role": "user", "content": request.userPrompt]
-                ],
-                "temperature": request.temperature
-            ]
-        case .anthropicMessages, .anthropicCompatible:
-            return [
-                "model": request.model,
-                "system": request.systemPrompt,
                 "messages": [
                     ["role": "user", "content": request.userPrompt]
-                ],
-                "temperature": request.temperature
-            ]
-        case .openAICompatible:
-            // Qwen-MT (DashScope) has a strict shape: exactly ONE user
-            // message with the text, no system message, and the language
-            // pair plus glossary terms in a TOP-LEVEL
-            // `translation_options` field. M2: the previous code nested
-            // it under `extra_body`, which is only an OpenAI Python SDK
-            // parameter mechanism — the official curl example sends
-            // `translation_options` at the top level, and a raw HTTP
-            // call would never reach the server's language settings.
-            // Temperature is left out: Qwen-MT is a specialist model and
-            // the docs do not list it as a supported parameter.
-            if profile.isQwenMT {
-                var options: [String: Any] = [
-                    "source_lang": "auto",
-                    "target_lang": QwenMT.languageCode(for: request.targetLanguage)
                 ]
-                if !request.glossaryTerms.isEmpty {
-                    options["terms"] = request.glossaryTerms.map {
-                        ["source": $0.source, "target": $0.target]
-                    }
-                }
-                return [
-                    "model": request.model,
-                    "messages": [
-                        ["role": "user", "content": request.userPrompt]
-                    ],
-                    "translation_options": options
-                ]
-            }
-            var openAIBody: [String: Any] = [
-                "model": request.model,
-                "messages": [
-                    ["role": "system", "content": request.systemPrompt],
-                    ["role": "user", "content": request.userPrompt]
-                ],
-                "temperature": request.temperature
             ]
-            if isDeepSeekDomain(profile) {
-                openAIBody["thinking"] = ["type": "disabled"]
-            }
-            return openAIBody
         }
+        // Qwen-MT (DashScope) has a strict shape: exactly ONE user
+        // message with the text, no system message, and the language
+        // pair plus glossary terms in a TOP-LEVEL
+        // `translation_options` field. M2: the previous code nested
+        // it under `extra_body`, which is only an OpenAI Python SDK
+        // parameter mechanism — the official curl example sends
+        // `translation_options` at the top level, and a raw HTTP
+        // call would never reach the server's language settings.
+        // Temperature is left out: Qwen-MT is a specialist model and
+        // the docs do not list it as a supported parameter.
+        if profile.isQwenMT {
+            var options: [String: Any] = [
+                "source_lang": "auto",
+                "target_lang": try QwenMT.languageCode(for: request.targetLanguage)
+            ]
+            if !request.glossaryTerms.isEmpty {
+                options["terms"] = request.glossaryTerms.map {
+                    ["source": $0.source, "target": $0.target]
+                }
+            }
+            return [
+                "model": request.model,
+                "messages": [
+                    ["role": "user", "content": request.userPrompt]
+                ],
+                "translation_options": options
+            ]
+        }
+        var openAIBody: [String: Any] = [
+            "model": request.model,
+            "messages": [
+                ["role": "system", "content": request.systemPrompt],
+                ["role": "user", "content": request.userPrompt]
+            ],
+            "temperature": request.temperature
+        ]
+        if isDeepSeekDomain(profile) {
+            openAIBody["thinking"] = ["type": "disabled"]
+        }
+        return openAIBody
     }
 
     /// DeepSeek's API honors an explicit thinking toggle; its default is
@@ -438,7 +417,7 @@ public enum ProviderRequestFactory {
     public static func streamingURLRequest(profile: ProviderProfile, apiKey: String, request: LLMRequest) throws -> URLRequest {
         var urlRequest = try urlRequest(profile: profile, apiKey: apiKey, request: request)
         guard profile.kind == .openAICompatible else { return urlRequest }
-        var streamBody = body(profile: profile, request: request)
+        var streamBody = try body(profile: profile, request: request)
         streamBody["stream"] = true
         streamBody["stream_options"] = ["include_usage": true]
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: streamBody, options: [])
@@ -467,35 +446,23 @@ public enum ProviderRequestFactory {
 
 public enum ProviderResponseParser {
     /// Parse a non-streamed JSON body into an `LLMResponse`.
+    /// S17: only OpenAI-compatible bodies are parsed — the Responses
+    /// and Anthropic shapes were dead code (no live path serves
+    /// those kinds; see performAttempt).
     public static func parse(data: Data, kind: ProviderKind) throws -> LLMResponse {
+        guard kind == .openAICompatible else {
+            throw LLMProviderError.unsupported("该模型类型暂未接入。")
+        }
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw LLMProviderError.malformedJSON
         }
-        let content: String?
-        let reasoning: String?
-        switch kind {
-        case .openAIResponses:
-            content = parseResponsesText(object)
-            reasoning = nil
-        case .openAICompatible:
-            let message = (object["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]
-            content = message?["content"] as? String
-            // DeepSeek and other reasoning-capable OpenAI-compatible providers
-            // surface chain-of-thought on `message.reasoning_content`. Fall back
-            // to it when `content` is empty so a thinking-only response still
-            // produces something useful.
-            reasoning = message?["reasoning_content"] as? String
-        case .anthropicMessages, .anthropicCompatible:
-            let blocks = object["content"] as? [[String: Any]] ?? []
-            content = blocks
-                .filter { ($0["type"] as? String) != "thinking" }
-                .compactMap { $0["text"] as? String }
-                .joined(separator: "\n")
-            reasoning = blocks
-                .filter { ($0["type"] as? String) == "thinking" }
-                .compactMap { $0["thinking"] as? String }
-                .joined(separator: "\n")
-        }
+        let message = (object["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]
+        let content = message?["content"] as? String
+        // DeepSeek and other reasoning-capable OpenAI-compatible providers
+        // surface chain-of-thought on `message.reasoning_content`. Fall back
+        // to it when `content` is empty so a thinking-only response still
+        // produces something useful.
+        let reasoning = message?["reasoning_content"] as? String
         // M4: same rule as `finalize` — empty content throws
         // emptyOutput; reasoning/thinking text is never returned as
         // the translation.
@@ -509,14 +476,6 @@ public enum ProviderResponseParser {
             model: object["model"] as? String,
             usage: parseUsage(object["usage"] as? [String: Any])
         )
-    }
-
-    private static func parseResponsesText(_ object: [String: Any]) -> String? {
-        if let direct = object["output_text"] as? String { return direct }
-        guard let output = object["output"] as? [[String: Any]] else { return nil }
-        return output.compactMap { item in
-            (item["content"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined()
-        }.joined(separator: "\n")
     }
 
     static func parseUsage(_ usage: [String: Any]?) -> [String: Int] {

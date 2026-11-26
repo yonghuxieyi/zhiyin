@@ -100,6 +100,12 @@ public final class InterpretationEngine: ObservableObject {
     @Published public private(set) var latency: LatencyBudget.Measurement?
     @Published public private(set) var quota: InterpretationQuotaStore.Snapshot
     @Published public private(set) var lockedDirection: Direction?
+    /// S10: true while `stop()` is winding the session down, with a
+    /// human-readable step in `stopProgress`. Stopping used to take
+    /// 6 s + 8 s + one translation call per leftover sentence with
+    /// the UI frozen on the running state and no progress at all.
+    @Published public private(set) var isStopping = false
+    @Published public private(set) var stopProgress: String?
 
     private let quotaStore: InterpretationQuotaStore
     private let router = EarphoneRouter()
@@ -141,6 +147,22 @@ public final class InterpretationEngine: ObservableObject {
     /// M10: when the session was paused, to decide on resume whether
     /// the socket is too stale to continue.
     private var pausedAt: Date?
+    /// S11: ASR trial minutes only accrue while the sequential
+    /// fallback is actually running — live sessions use the AST
+    /// service, not the ASR 2.0 trial, and paused time counts for
+    /// neither. `fallbackStartedAt` marks the current fallback
+    /// stretch (nil while live or paused); `fallbackSeconds`
+    /// accumulates the closed stretches.
+    private var fallbackStartedAt: Date?
+    private var fallbackSeconds: TimeInterval = 0
+
+    /// Closes the current fallback stretch into `fallbackSeconds`.
+    private func closeFallbackStretch() {
+        if let start = fallbackStartedAt {
+            fallbackSeconds += Date().timeIntervalSince(start)
+            fallbackStartedAt = nil
+        }
+    }
     /// M10: consecutive live `sendAudio` failures; hitting the
     /// threshold falls back instead of going silently dead.
     private var consecutiveSendFailures = 0
@@ -148,6 +170,13 @@ public final class InterpretationEngine: ObservableObject {
     public init(quotaStore: InterpretationQuotaStore = InterpretationQuotaStore()) {
         self.quotaStore = quotaStore
         self.quota = quotaStore.snapshot()
+    }
+
+    /// S12: re-reads the quota snapshot (e.g. after the balance was
+    /// updated by hand in Settings) so the page shows the new value
+    /// without waiting for the next session.
+    public func refreshQuota() {
+        quota = quotaStore.snapshot()
     }
 
     /// N6 backstop: if the engine is dropped without `stop()` (view
@@ -205,6 +234,8 @@ public final class InterpretationEngine: ObservableObject {
         self.sessionEndTime = nil
         self.firstAudioSentAt = nil
         self.fallbackTranslated = []
+        self.fallbackStartedAt = nil
+        self.fallbackSeconds = 0
         phase = .connecting
         mode = .live
         await startLiveSessions()
@@ -215,6 +246,8 @@ public final class InterpretationEngine: ObservableObject {
         isPaused = true
         phase = .paused
         pausedAt = .now
+        // S11: paused time is not fallback time.
+        closeFallbackStretch()
         recorder.stop()
         router.stop()
     }
@@ -229,6 +262,10 @@ public final class InterpretationEngine: ObservableObject {
         // resuming a dead one.
         let pausedFor = pausedAt.map { Date().timeIntervalSince($0) } ?? 0
         pausedAt = nil
+        // S11: a resumed fallback stretch starts counting again.
+        if mode == .fallback {
+            fallbackStartedAt = .now
+        }
         if mode == .live {
             // LiveInterpretClient is an actor: isConnected needs await.
             // Each await must be its own statement: `||` / `??` take
@@ -249,6 +286,12 @@ public final class InterpretationEngine: ObservableObject {
     /// Stops everything and returns the session record for the view
     /// to persist. Safe to call twice.
     public func stop() async -> InterpretationSessionRecord {
+        isStopping = true
+        stopProgress = "正在结束会话…"
+        defer {
+            isStopping = false
+            stopProgress = nil
+        }
         // Mark stopped first: event-stream teardown below must not
         // trigger a fallback switch on the way out.
         phase = .stopped
@@ -271,15 +314,29 @@ public final class InterpretationEngine: ObservableObject {
         if mode == .fallback {
             await finishFallbackRemainder()
         }
-        if let forwardClient { await forwardClient.finish() }
-        if let reverseClient { await reverseClient.finish() }
+        // S10: the two directions' finish() calls each wait up to
+        // 3 s for SessionFinished — run them in parallel instead of
+        // 6 s serial.
+        stopProgress = "正在断开同传连接…"
+        await withTaskGroup(of: Void.self) { group in
+            if let forwardClient {
+                group.addTask { await forwardClient.finish() }
+            }
+            if let reverseClient {
+                group.addTask { await reverseClient.finish() }
+            }
+        }
         forwardClient = nil
         reverseClient = nil
         await asrClient?.cancel()
         asrClient = nil
         streamingSpeaker = nil
-        if let start = sessionStartTime, let end = sessionEndTime {
-            quotaStore.recordASR(minutes: end.timeIntervalSince(start) / 60.0)
+        // S11: only fallback-active time burns ASR trial minutes.
+        // Live sessions run on the AST service, paused time counts
+        // for nothing.
+        closeFallbackStretch()
+        if fallbackSeconds > 0 {
+            quotaStore.recordASR(minutes: fallbackSeconds / 60.0)
         }
         quota = quotaStore.snapshot()
         return InterpretationSessionRecord(
@@ -342,22 +399,47 @@ public final class InterpretationEngine: ObservableObject {
         reverseAssembler = nil
 
         let directions = activeDirections()
-        var startedAny = false
-        var startedCount = 0
-        var lastError: String?
-        for (index, dir) in directions.enumerated() {
-            let isForward = index == 0
+        let clients: [LiveInterpretClient] = directions.map { dir in
             let sessionConfig = ASTSessionConfig(
                 mode: .s2s,
                 sourceLanguage: dir.forwardSource,
                 targetLanguage: dir.forwardTarget,
                 glossary: glossary
             )
-            let client = LiveInterpretClient(config: config, sessionConfig: sessionConfig)
-            connectingClients.append(client)
-            do {
-                let stream = try await client.start()
-                connectingClients.removeAll { $0 === client }
+            return LiveInterpretClient(config: config, sessionConfig: sessionConfig)
+        }
+        for client in clients { connectingClients.append(client) }
+        // S21: the two handshakes used to run serially (up to 10 s
+        // each = 20 s before going live). They overlap now — each
+        // child awaits its own client's start() and the network
+        // waits interleave while the other child is suspended.
+        // Result carries the error message as a String because
+        // `Error` is not Sendable and cannot cross the task group.
+        let outcomes = await withTaskGroup(of: (Int, Result<AsyncStream<LiveInterpretClient.Event>, String>).self) { group in
+            for (index, client) in clients.enumerated() {
+                group.addTask {
+                    do {
+                        let stream = try await client.start()
+                        return (index, .success(stream))
+                    } catch {
+                        return (index, .failure((error as? LocalizedError)?.errorDescription ?? error.localizedDescription))
+                    }
+                }
+            }
+            var collected: [(Int, Result<AsyncStream<LiveInterpretClient.Event>, String>)] = []
+            for await outcome in group { collected.append(outcome) }
+            return collected
+        }
+        var startedAny = false
+        var startedCount = 0
+        var lastError: String?
+        for (index, outcome) in outcomes.sorted(by: { $0.0 < $1.0 }) {
+            let dir = directions[index]
+            let isForward = index == 0
+            let client = clients[index]
+            connectingClients.removeAll { $0 === client }
+            switch outcome {
+            case .success(let stream):
                 if isForward {
                     forwardClient = client
                     forwardAssembler = InterpretationSegmentAssembler(direction: dir == .enToZh ? .enToZh : .zhToEn)
@@ -374,9 +456,8 @@ public final class InterpretationEngine: ObservableObject {
                 })
                 startedAny = true
                 startedCount += 1
-            } catch {
-                connectingClients.removeAll { $0 === client }
-                lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            case .failure(let detail):
+                lastError = detail
             }
         }
 
@@ -396,6 +477,9 @@ public final class InterpretationEngine: ObservableObject {
         }
 
         if startedAny {
+            // S11: leaving fallback closes the stretch — the ASR
+            // minutes used while fallen back stay counted.
+            closeFallbackStretch()
             mode = .live
             phase = isPaused ? .paused : .live
             grantPending = false
@@ -653,6 +737,11 @@ public final class InterpretationEngine: ObservableObject {
         phase = isPaused ? .paused : .fallback
         fallbackReason = reason
         errorMessage = nil
+        // S11: a fallback stretch only counts while running, not
+        // while paused.
+        if fallbackStartedAt == nil && !isPaused {
+            fallbackStartedAt = .now
+        }
         for task in eventTasks { task.cancel() }
         eventTasks = []
         if let forwardClient { await forwardClient.cancel() }
@@ -761,13 +850,22 @@ public final class InterpretationEngine: ObservableObject {
     private func finishFallbackRemainder() async {
         // Translate whatever the ASR stream left untranslated.
         guard let client = asrClient else { return }
+        stopProgress = "正在收尾语音识别…"
         let remainder = (try? await client.finish()) ?? ""
         let sentences = TextSegmenter.splitSentences(remainder)
-        for sentence in sentences {
-            let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, !fallbackTranslated.contains(trimmed) else { continue }
-            fallbackTranslated.append(trimmed)
-            await translateFallbackSentence(trimmed)
+        let pending = sentences
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !fallbackTranslated.contains($0) }
+        // S10: cap the tail at 10 sentences with progress. A long
+        // untranslated tail used to mean one translation call per
+        // sentence with no progress and no end in sight; the excess
+        // tail is dropped from the saved record (its source was
+        // never settled into a segment).
+        let capped = Array(pending.prefix(10))
+        for (index, sentence) in capped.enumerated() {
+            stopProgress = "正在补译剩余句子 \(index + 1)/\(capped.count)…"
+            fallbackTranslated.append(sentence)
+            await translateFallbackSentence(sentence)
         }
     }
 }

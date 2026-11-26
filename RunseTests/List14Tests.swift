@@ -9,7 +9,7 @@ final class List14Tests: XCTestCase {
 
     // MARK: - 清单 2: Qwen-MT request shape
 
-    func testQwenMTBodyHasSingleUserMessageAndTopLevelOptions() {
+    func testQwenMTBodyHasSingleUserMessageAndTopLevelOptions() throws {
         let profile = ProviderProfile.qwenMTFlash()
         let request = LLMRequest(
             action: .translate,
@@ -19,7 +19,7 @@ final class List14Tests: XCTestCase {
             targetLanguage: "English",
             glossaryTerms: [GlossaryTerm(source: "API", target: "接口")]
         )
-        let body = ProviderRequestFactory.body(profile: profile, request: request)
+        let body = try ProviderRequestFactory.body(profile: profile, request: request)
         let messages = body["messages"] as? [[String: Any]]
         XCTAssertEqual(messages?.count, 1)
         XCTAssertEqual(messages?.first?["role"] as? String, "user")
@@ -35,7 +35,7 @@ final class List14Tests: XCTestCase {
         XCTAssertEqual(terms, [["source": "API", "target": "接口"]])
     }
 
-    func testQwenMTBodyTargetLanguageChinese() {
+    func testQwenMTBodyTargetLanguageChinese() throws {
         let profile = ProviderProfile.qwenMTPlus()
         let request = LLMRequest(
             action: .translate,
@@ -44,7 +44,7 @@ final class List14Tests: XCTestCase {
             userPrompt: "Hello, world",
             targetLanguage: "中文"
         )
-        let body = ProviderRequestFactory.body(profile: profile, request: request)
+        let body = try ProviderRequestFactory.body(profile: profile, request: request)
         let options = body["translation_options"] as? [String: Any]
         XCTAssertEqual(options?["target_lang"] as? String, "Chinese")
         XCTAssertNil(options?["terms"], "No glossary terms means no terms key")
@@ -263,9 +263,12 @@ final class List14Tests: XCTestCase {
         XCTAssertTrue(verdict.primaryWon, "Primary is sane length, second is far too short relative to source")
     }
 
-    func testDualModelEmptyBothAgreeOnPrimary() {
+    // S22: both models returning nothing is a double failure, not
+    // agreement — it must be flagged for review.
+    func testDualModelEmptyBothNeedsReview() {
         let verdict = DualModelCompare.compare(primary: "", second: "", source: "Hello", glossary: [])
-        XCTAssertTrue(verdict.agreed)
+        XCTAssertFalse(verdict.agreed)
+        XCTAssertTrue(verdict.needsReview)
         XCTAssertEqual(verdict.chosen, "")
     }
 }

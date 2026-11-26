@@ -35,9 +35,29 @@ public enum QwenMT {
     public static let maxSegmentChars = 1500
 
     /// Qwen-MT wants English language names ("Chinese", "English").
-    /// The app's target language is "中文" or "English".
-    public static func languageCode(for targetLanguage: String) -> String {
-        targetLanguage == "中文" ? "Chinese" : "English"
+    /// S20: the old version mapped everything that was not "中文"
+    /// to English — an extension target of Japanese silently became
+    /// an English translation. Known languages map to their proper
+    /// names; anything else throws instead of mistranslating.
+    public static func languageCode(for targetLanguage: String) throws -> String {
+        switch targetLanguage {
+        case "中文", "Simplified Chinese", "Traditional Chinese", "Chinese":
+            return "Chinese"
+        case "English":
+            return "English"
+        case "Japanese":
+            return "Japanese"
+        case "Korean":
+            return "Korean"
+        case "Spanish":
+            return "Spanish"
+        case "French":
+            return "French"
+        case "German":
+            return "German"
+        default:
+            throw LLMProviderError.unsupported("Qwen-MT 不支持目标语言“\(targetLanguage)”（只支持中、英、日、韩、西、法、德），请换 DeepSeek。")
+        }
     }
 }
 
@@ -53,6 +73,16 @@ public enum DashScopeStore {
     public static func loadKey() async -> String? {
         let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
         guard let key = try? await keychain.load(service: apiKeyService, account: account),
+              !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return key
+    }
+
+    /// S6: throwing variant (see ProviderKeyStore.loadKeyThrowing) —
+    /// a keychain fault must read as a read failure, not as "key not
+    /// configured".
+    public static func loadKeyThrowing() async throws -> String? {
+        let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
+        guard let key = try await keychain.load(service: apiKeyService, account: account),
               !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return key
     }
@@ -85,8 +115,19 @@ public enum DashScopeStore {
     public static func saveWorkspaceID(_ id: String) async throws {
         let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        // S20: validate at entry — an invalid ID must never reach a
+        // request host (see QwenAudio.isValidWorkspaceID).
+        guard QwenAudio.isValidWorkspaceID(trimmed) else { throw QwenVoiceError.invalidWorkspaceID }
         let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
         try await keychain.save(trimmed, service: workspaceIDService, account: account)
+    }
+
+    /// S18: a mistyped workspace ID had no way back — saving empty
+    /// was a silent no-op and the button was disabled on empty.
+    /// Deleting returns the app to the default domain.
+    public static func clearWorkspaceID() async throws {
+        let keychain = KeychainStore(accessGroup: KeychainAccessGroup.current())
+        try await keychain.delete(service: workspaceIDService, account: account)
     }
 }
 

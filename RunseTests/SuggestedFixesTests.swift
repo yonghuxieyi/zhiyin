@@ -159,6 +159,34 @@ final class SuggestedFixesTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(latency ?? -1, 0)
     }
 
+    // S23: a translation that arrives AFTER the next source
+    // sentence started must sample against its OWN sentence's start,
+    // not the next sentence's. Sentence 1 starts, 300 ms pass,
+    // sentence 2 starts, then sentence 1's translation arrives: the
+    // sample must be ~300 ms, not ~0 ms.
+    func testLateTranslationSamplesAgainstItsOwnSentence() {
+        var assembler = InterpretationSegmentAssembler(direction: .zhToEn, mode: .live)
+        assembler.apply(.sourcePartial(text: "你好"))
+        assembler.apply(.sourceFinal(text: "你好", startMs: 0, endMs: 1000, speakerChanged: false))
+        Thread.sleep(forTimeInterval: 0.3)
+        assembler.apply(.sourcePartial(text: "再见"))
+        assembler.apply(.sourceFinal(text: "再见", startMs: 1000, endMs: 2000, speakerChanged: false))
+        assembler.apply(.translationFinal(text: "Hello", startMs: 1200, endMs: 2000, speakerChanged: false))
+        XCTAssertEqual(assembler.segments.count, 2)
+        let latency = assembler.segments[0].latencyMs
+        XCTAssertNotNil(latency, "late translation must still sample against its own sentence's start")
+        XCTAssertGreaterThanOrEqual(latency ?? -1, 250, "sampled against the next sentence's start it would be ~0 ms")
+    }
+
+    // S23: a translation with no source sentence has no baseline —
+    // it samples nil instead of borrowing some other sentence's start.
+    func testTranslationWithoutSourceSamplesNilLatency() {
+        var assembler = InterpretationSegmentAssembler(direction: .zhToEn, mode: .live)
+        assembler.apply(.translationFinal(text: "Hello", startMs: 0, endMs: 1000, speakerChanged: false))
+        XCTAssertEqual(assembler.segments.count, 1)
+        XCTAssertNil(assembler.segments[0].latencyMs)
+    }
+
     func testSourceSpeakerChangeDoesNotLeakIntoTranslationSettle() {
         var assembler = InterpretationSegmentAssembler(direction: .zhToEn, mode: .live)
         assembler.apply(.sourceStarted(speakerChanged: true))

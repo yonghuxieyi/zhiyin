@@ -28,19 +28,34 @@ struct ZhiyinApp: App {
         do {
             let created = try Bootstrap.modelContainer()
             Task { @MainActor in
-                try? Bootstrap.seedDefaultsIfNeeded(context: created.mainContext)
+                Self.seedOrRecord(context: created.mainContext)
             }
             return created
         } catch {
             let backupURL = try Bootstrap.backupDatabase()
             let created = try Bootstrap.modelContainer()
             Task { @MainActor in
-                try? Bootstrap.seedDefaultsIfNeeded(context: created.mainContext)
+                Self.seedOrRecord(context: created.mainContext)
             }
             // The backup is kept for the user; note it in the log
             // rather than surfacing a scary error.
             print("Zhiyin: database rebuilt, old copy kept at \(backupURL.path)")
             return created
+        }
+    }
+
+    /// S25: seed the defaults, but never swallow a failure again.
+    /// A failure is logged and recorded for Settings (see
+    /// BootstrapSeedStatus); the next launch retries, because
+    /// seeding is insert-only.
+    @MainActor
+    private static func seedOrRecord(context: ModelContext) {
+        do {
+            try Bootstrap.seedDefaultsIfNeeded(context: context)
+            BootstrapSeedStatus.clear()
+        } catch {
+            print("Zhiyin: seeding defaults failed: \(error)")
+            BootstrapSeedStatus.record(error.localizedDescription)
         }
     }
 

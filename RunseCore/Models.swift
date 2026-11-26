@@ -158,6 +158,13 @@ public enum OutputLength: String, Codable, CaseIterable, Identifiable, Sendable 
         model.hasPrefix("qwen-mt")
     }
 
+    /// S13: both DeepSeek profiles share one vendor key — a key saved
+    /// under either profile id works for the other (the resolver
+    /// falls back to the sibling id).
+    public var isDeepSeek: Bool {
+        id == RunseConstants.defaultProfileID || id == RunseConstants.deepSeekProProfileID
+    }
+
     /// M3: Plus streams non-incrementally (each chunk is the full
     /// translation so far) while Flash is incremental. Only used to
     /// pick the chunk-merging strategy in `HTTPProviderClient`.
