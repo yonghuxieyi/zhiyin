@@ -44,7 +44,7 @@ public enum TranslationRequestResolver {
         // N1: Qwen-MT keys live in DashScopeStore, not ProviderKeyStore.
         // Reading the wrong store made every screen report missingAPIKey
         // as soon as Qwen-MT was picked as the main model.
-        let stored: String?
+        var stored: String?
         if profile.isQwenMT {
             stored = await DashScopeStore.loadKey()
         } else {

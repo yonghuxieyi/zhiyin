@@ -416,7 +416,7 @@ struct VoiceView: View {
         if let config {
             do {
                 try await speakStreaming(translation, config: config)
-            } catch is CancellationError {
+            } catch let error as CancellationError {
                 // S24: a cancel during TTS must propagate to
                 // stopListening, not fall through to the async
                 // fallback and end as a spurious "synthesis failed".
@@ -426,7 +426,7 @@ struct VoiceView: View {
                     let audio = try await VolcanoTTSClient(config: config).synthesize(text: translation, speaker: speakerID, speechRate: speechRate)
                     lastAudio = audio
                     playTranslation()
-                } catch is CancellationError {
+                } catch let error as CancellationError {
                     throw error
                 } catch {
                     errorMessage = "译文已出，但语音合成失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
@@ -462,7 +462,7 @@ struct VoiceView: View {
             try await client.synthesize(text: text, speaker: speakerID, speechRate: speechRate) { pcm in
                 streamingPlayer.enqueue(pcm)
             }
-        } catch is CancellationError {
+        } catch let error as CancellationError {
             // S24: cancelling must not drop the shared connection —
             // it is still healthy, only the sentence was cancelled.
             // But the "正在播放" flag was set before synthesize, and

@@ -140,7 +140,7 @@ public actor LiveInterpretClient {
                 }
                 try await Task.sleep(for: .milliseconds(50))
             }
-        } catch is CancellationError {
+        } catch let error as CancellationError {
             await cancel()
             throw error
         }
