@@ -1,11 +1,18 @@
+import CryptoKit
 import Foundation
 import PDFKit
 import UIKit
 
-/// PDF document translation (清单 11): import, extract text per page
-/// (scanned pages go through Vision OCR), translate segment by segment
-/// with the glossary kept consistent, show progress, and export a
-/// translated PDF.
+/// PDF document translation (清单 11, M12): import, extract text per
+/// page (scanned pages go through Vision OCR), merge adjacent lines
+/// into paragraphs (line spacing + sentence-final punctuation),
+/// translate paragraph by paragraph with the glossary kept
+/// consistent, show progress, and export a translated PDF.
+///
+/// A paragraph that fails to translate keeps its original text with
+/// a failure mark and the run continues; translated pages are
+/// persisted to disk as they finish so translation can resume from
+/// the breakpoint.
 ///
 /// Export, two paths:
 /// - Text pages with known line boxes: the original page is drawn into
@@ -36,6 +43,26 @@ public struct PDFTextLine: Sendable, Equatable {
     }
 }
 
+/// One paragraph on a page: the source lines merged by the M12
+/// rule below, with the union of their boxes. The translation unit
+/// is the paragraph, not the line.
+public struct PDFParagraph: Sendable, Equatable {
+    public var text: String
+    public var lines: [PDFTextLine]
+    /// Union of the line boxes (`.zero` when no line had a box).
+    public var bounds: CGRect
+
+    public init(text: String, lines: [PDFTextLine]) {
+        self.text = text
+        self.lines = lines
+        // Only real boxes count: a `.zero` (unknown) box must not drag
+        // the union out to the origin.
+        let boxes = lines.map(\.bounds).filter { $0 != .zero }
+        self.bounds = boxes.reduce(CGRect.null) { $0.union($1) }
+        if self.bounds.isNull { self.bounds = .zero }
+    }
+}
+
 public struct PDFPageContent: Sendable {
     public var index: Int
     public var lines: [PDFTextLine]
@@ -52,37 +79,154 @@ public struct PDFPageContent: Sendable {
     public var plainText: String {
         lines.map(\.text).joined(separator: "\n")
     }
-}
 
-public struct PDFTranslatedLine: Sendable, Equatable {
-    public var source: String
-    public var translation: String
-    public var bounds: CGRect
-    public var check: DualModelCompare.Verdict?
+    /// M12: merge adjacent lines into paragraphs. Lines are in
+    /// top-to-bottom reading order (PDF coordinates: origin
+    /// bottom-left, so the upper line has the larger y).
+    ///
+    /// A new paragraph starts when:
+    /// - the previous line ends with sentence-final punctuation
+    ///   (。！？!?…；;) AND the vertical gap to the next line is
+    ///   wider than normal line spacing (> 0.4 × line height), or
+    /// - the vertical gap is blank-line sized (> 1.5 × line height).
+    /// When either box is unknown (`.zero`) only the punctuation rule
+    /// applies, so a wrapped sentence is never split by a missing box.
+    public var paragraphs: [PDFParagraph] {
+        guard !lines.isEmpty else { return [] }
+        var result: [PDFParagraph] = []
+        var current: [PDFTextLine] = [lines[0]]
+        for line in lines.dropFirst() {
+            let prev = current.last!
+            if startsNewParagraph(after: prev, next: line) {
+                result.append(PDFParagraph(text: current.map(\.text).joined(), lines: current))
+                current = [line]
+            } else {
+                current.append(line)
+            }
+        }
+        result.append(PDFParagraph(text: current.map(\.text).joined(), lines: current))
+        return result
+    }
 
-    public init(source: String, translation: String, bounds: CGRect, check: DualModelCompare.Verdict? = nil) {
-        self.source = source
-        self.translation = translation
-        self.bounds = bounds
-        self.check = check
+    private func startsNewParagraph(after prev: PDFTextLine, next: PDFTextLine) -> Bool {
+        let endsSentence = PDFTranslation.endsSentence(prev.text)
+        let prevBox = prev.bounds
+        let nextBox = next.bounds
+        guard prevBox != .zero, nextBox != .zero, prevBox.height > 0 else {
+            // No geometry to judge spacing by — punctuation alone.
+            return endsSentence
+        }
+        // Gap between the bottom of the upper line and the top of the
+        // lower line (PDF coords grow upwards).
+        let gap = prevBox.minY - nextBox.maxY
+        let lineHeight = prevBox.height
+        if gap > lineHeight * 1.5 { return true }
+        if endsSentence && gap > lineHeight * 0.4 { return true }
+        return false
     }
 }
 
-public struct PDFTranslatedPage: Sendable {
+/// One translated paragraph. `failed` means the translation call
+/// failed and `translation` is the original text, kept so the run
+/// could continue — the UI marks it and the user can retry it later.
+/// `check` is the dual-model verdict; it is not persisted (it can be
+/// re-run), so Codable skips it.
+public struct PDFTranslatedParagraph: Sendable, Equatable, Codable {
+    public var source: String
+    public var translation: String
+    public var bounds: CGRect
+    public var failed: Bool
+    public var check: DualModelCompare.Verdict?
+
+    public init(source: String, translation: String, bounds: CGRect, failed: Bool = false, check: DualModelCompare.Verdict? = nil) {
+        self.source = source
+        self.translation = translation
+        self.bounds = bounds
+        self.failed = failed
+        self.check = check
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case source, translation, bounds, failed
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        source = try container.decode(String.self, forKey: .source)
+        translation = try container.decode(String.self, forKey: .translation)
+        bounds = try container.decode(CGRect.self, forKey: .bounds)
+        failed = try container.decodeIfPresent(Bool.self, forKey: .failed) ?? false
+        check = nil
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(source, forKey: .source)
+        try container.encode(translation, forKey: .translation)
+        try container.encode(bounds, forKey: .bounds)
+        try container.encode(failed, forKey: .failed)
+    }
+}
+
+public struct PDFTranslatedPage: Sendable, Codable {
     public var index: Int
-    public var lines: [PDFTranslatedLine]
+    public var paragraphs: [PDFTranslatedParagraph]
     public var isScanned: Bool
     public var pageSize: CGSize
 
-    public init(index: Int, lines: [PDFTranslatedLine], isScanned: Bool, pageSize: CGSize) {
+    public init(index: Int, paragraphs: [PDFTranslatedParagraph], isScanned: Bool, pageSize: CGSize) {
         self.index = index
-        self.lines = lines
+        self.paragraphs = paragraphs
         self.isScanned = isScanned
         self.pageSize = pageSize
     }
 
     public var plainTranslation: String {
-        lines.map(\.translation).joined(separator: "\n")
+        paragraphs.map(\.translation).joined(separator: "\n\n")
+    }
+}
+
+/// Persists translated PDF pages to disk so a translation can resume
+/// from its breakpoint after a failure, a cancellation, or the app
+/// being killed. One file per document, keyed by the SHA-256 of the
+/// document data.
+public enum PDFProgressStore {
+    public struct SavedProgress: Codable {
+        public var fileName: String
+        public var pageCount: Int
+        public var pages: [PDFTranslatedPage]
+        public var savedAt: Date
+    }
+
+    public static func documentHash(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    public static func progressURL(forHash hash: String) -> URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Zhiyin/PDFProgress", isDirectory: true)
+        return dir.appendingPathComponent("\(hash).json")
+    }
+
+    public static func save(hash: String, fileName: String, pageCount: Int, pages: [PDFTranslatedPage]) throws {
+        let url = progressURL(forHash: hash)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let progress = SavedProgress(fileName: fileName, pageCount: pageCount, pages: pages, savedAt: Date())
+        let data = try JSONEncoder().encode(progress)
+        try data.write(to: url, options: .atomic)
+    }
+
+    /// Returns the saved progress only when it matches this document
+    /// (same page count); otherwise nil (stale progress is ignored).
+    public static func load(hash: String, pageCount: Int) -> SavedProgress? {
+        guard let data = try? Data(contentsOf: progressURL(forHash: hash)),
+              let progress = try? JSONDecoder().decode(SavedProgress.self, from: data),
+              progress.pageCount == pageCount else { return nil }
+        return progress
+    }
+
+    public static func delete(hash: String) {
+        try? FileManager.default.removeItem(at: progressURL(forHash: hash))
     }
 }
 
@@ -93,6 +237,19 @@ public enum PDFTranslation {
     ///
     /// Main-actor isolated on purpose: the caller hands over its
     /// `@State PDFDocument`, which must not cross to nonisolated code.
+    /// Sentence-final punctuation, shared by the paragraph merge
+    /// and the segmenter. Trailing closing quotes/brackets are
+    /// ignored when judging the end of a line.
+    public static func endsSentence(_ text: String) -> Bool {
+        let closers: Set<Character> = ["」", "』", "”", "’", "）", ")", "]", "】"]
+        var trimmed = text.trimmingCharacters(in: .whitespaces)
+        while let last = trimmed.last, closers.contains(last) {
+            trimmed.removeLast()
+        }
+        guard let last = trimmed.last else { return false }
+        return ["。", "！", "？", "!", "?", "…", "；", ";"].contains(last)
+    }
+
     @MainActor
     public static func extractPages(from document: PDFDocument) async -> [PDFPageContent] {
         var result: [PDFPageContent] = []
@@ -110,8 +267,14 @@ public enum PDFTranslation {
                 continue
             }
             var lines: [PDFTextLine] = []
+            // M12: locate each line on THIS page only, by character
+            // range — the old whole-document findString could return a
+            // match on a different page (or the wrong occurrence of a
+            // repeated line). The running search offset maps repeated
+            // lines to successive occurrences in reading order.
+            var searchFrom = rawText.startIndex
             for line in textLines {
-                let bounds = box(for: line, on: page, in: document) ?? .zero
+                let bounds = box(for: line, on: page, in: rawText, searchFrom: &searchFrom) ?? .zero
                 lines.append(PDFTextLine(text: line, bounds: bounds))
             }
             result.append(PDFPageContent(index: index, lines: lines, isScanned: false, pageSize: size))
@@ -119,17 +282,18 @@ public enum PDFTranslation {
         return result
     }
 
-    /// Finds the first selection of `line` on `page` and returns its
-    /// bounds in page coordinates, or nil when not found.
-    private static func box(for line: String, on page: PDFPage, in document: PDFDocument) -> CGRect? {
-        let selections = document.findString(line, withOptions: [.caseInsensitive])
-        for selection in selections {
-            guard selection.pages.contains(page) else { continue }
-            let bounds = selection.bounds(for: page)
-            guard !bounds.isEmpty, bounds.width > 0, bounds.height > 0 else { continue }
-            return bounds
-        }
-        return nil
+    /// Finds `line` in the page's own text starting at `searchFrom`
+    /// (advancing it past the match), then asks the page for the
+    /// selection covering exactly that character range and returns
+    /// its bounds in page coordinates, or nil when not found.
+    private static func box(for line: String, on page: PDFPage, in rawText: String, searchFrom: inout String.Index) -> CGRect? {
+        guard let range = rawText.range(of: line, range: searchFrom..<rawText.endIndex) else { return nil }
+        searchFrom = range.upperBound
+        let nsRange = NSRange(range, in: rawText)
+        guard let selection = page.selection(for: nsRange) else { return nil }
+        let bounds = selection.bounds(for: page)
+        guard !bounds.isEmpty, bounds.width > 0, bounds.height > 0 else { return nil }
+        return bounds
     }
 
     /// Renders a scanned page and OCRs it. Boxes are converted from
@@ -175,12 +339,12 @@ public enum PDFTranslation {
             for tpage in translatedPages {
                 guard let originalPage = original.page(at: tpage.index) else { continue }
                 let pageSize = tpage.pageSize
-                let canDoInPlace = !tpage.isScanned && tpage.lines.allSatisfy { $0.bounds != .zero }
+                let canDoInPlace = !tpage.isScanned && tpage.paragraphs.allSatisfy { $0.bounds != .zero }
                 if canDoInPlace {
                     context.beginPage(withBounds: CGRect(origin: .zero, size: pageSize), pageInfo: [:])
                     drawOriginalPage(originalPage, pageSize: pageSize, in: context.cgContext)
-                    for line in tpage.lines {
-                        drawTranslatedLine(line, pageSize: pageSize, in: context.cgContext)
+                    for paragraph in tpage.paragraphs {
+                        drawTranslatedParagraph(paragraph, pageSize: pageSize, in: context.cgContext)
                     }
                 } else {
                     drawSimplifiedPage(originalPage: originalPage, tpage: tpage, in: context)
@@ -201,40 +365,49 @@ public enum PDFTranslation {
         context.restoreGState()
     }
 
-    /// Covers the original line with white and draws the translation
-    /// in its place, shrinking the font until it fits the box
+    /// Covers the original paragraph with white and draws the
+    /// translation in its place. A paragraph spans several source
+    /// lines, so the text wraps inside the union box and the font
+    /// shrinks until the wrapped text fits both width and height
     /// (minimum 6 pt). Coordinates are UIKit (top-left origin):
     /// the PDF box is flipped vertically.
-    private static func drawTranslatedLine(_ line: PDFTranslatedLine, pageSize: CGSize, in context: CGContext) {
-        let box = line.bounds
+    private static func drawTranslatedParagraph(_ paragraph: PDFTranslatedParagraph, pageSize: CGSize, in context: CGContext) {
+        let box = paragraph.bounds
         guard box.width > 0, box.height > 0 else { return }
         // PDF coords (bottom-left) -> UIKit coords (top-left).
         let uiRect = CGRect(x: box.minX, y: pageSize.height - box.maxY, width: box.width, height: box.height)
         // Cover the original text. A small inset keeps neighbouring
-        // lines untouched.
+        // paragraphs untouched.
         let cover = uiRect.insetBy(dx: -1, dy: -1)
         context.saveGState()
         context.setFillColor(UIColor.white.cgColor)
         context.fill(cover)
         context.restoreGState()
-        // Fit the font: start from the line height, shrink to fit.
+        // Fit the font: start from the line height, shrink until the
+        // wrapped text fits the box.
         var fontSize = min(box.height * 0.8, 16)
-        let text = line.translation as NSString
-        var attributes: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: fontSize)]
+        let text = paragraph.translation as NSString
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byWordWrapping
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: fontSize),
+            .paragraphStyle: paragraphStyle,
+        ]
         while fontSize > 6 {
-            let size = text.size(withAttributes: attributes)
-            if size.width <= box.width - 2 { break }
+            let size = text.boundingRect(
+                with: CGSize(width: uiRect.width - 2, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attributes, context: nil
+            ).size
+            if size.height <= uiRect.height { break }
             fontSize -= 0.5
             attributes[.font] = UIFont.systemFont(ofSize: fontSize)
         }
-        let textHeight = text.size(withAttributes: attributes).height
-        let drawRect = CGRect(
-            x: uiRect.minX,
-            y: uiRect.minY + (uiRect.height - textHeight) / 2,
-            width: uiRect.width,
-            height: textHeight
+        text.draw(
+            with: uiRect.insetBy(dx: 1, dy: 0),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes, context: nil
         )
-        text.draw(in: drawRect, withAttributes: attributes)
     }
 
     /// Simplified page: the original page as an image on top, the
