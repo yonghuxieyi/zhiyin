@@ -34,6 +34,14 @@ struct TranslateView: View {
     @State private var showingSettings = false
     @State private var showingModelPicker = false
     @State private var showingFullscreen = false
+    /// Item 5: language-card toggles (Apple Translate style) — persisted
+    /// in SettingsStore, same pattern as `tone` above.
+    @State private var playTranslationEnabled = SettingsStore().playTranslation
+    @State private var autoTranslateEnabled = SettingsStore().autoTranslate
+    @State private var detectLanguageEnabled = SettingsStore().detectLanguage
+    @State private var showingMoreCard = false
+    @State private var autoTranslateTask: Task<Void, Never>?
+    @State private var pendingSheetTask: Task<Void, Never>?
 
     private let settings = SettingsStore()
     private let pipeline = TranslationPipeline()
@@ -109,22 +117,15 @@ struct TranslateView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button { showingSettings = true } label: {
-                            Label("设置", systemImage: "gearshape")
-                        }
-                        Button { showingModelPicker = true } label: {
-                            Label("选择模型", systemImage: "cpu")
-                        }
-                        Button { showingGlossary = true } label: {
-                            Label("术语表", systemImage: "book")
-                        }
-                        Button(role: .destructive) { nextTranslation() } label: {
-                            Label("清空", systemImage: "trash")
-                        }
+                    // Item 5: the "..." menu is now an Apple-style card
+                    // (MoreOptionsCard) — settings on top, then the
+                    // language toggles, then model / glossary / clear.
+                    Button {
+                        showingMoreCard = true
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
+                    .accessibilityLabel("更多选项")
                 }
                 // Item 3: the checkmark only shows once text has been entered.
                 if !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -147,6 +148,20 @@ struct TranslateView: View {
             }
             .sheet(isPresented: $showingModelPicker) {
                 ModelPickerSheet()
+            }
+            .sheet(isPresented: $showingMoreCard) {
+                MoreOptionsCard(
+                    playTranslationEnabled: $playTranslationEnabled,
+                    autoTranslateEnabled: $autoTranslateEnabled,
+                    detectLanguageEnabled: $detectLanguageEnabled,
+                    onOpenSettings: { openSheetAfterCardDismiss { showingSettings = true } },
+                    onOpenModelPicker: { openSheetAfterCardDismiss { showingModelPicker = true } },
+                    onOpenGlossary: { openSheetAfterCardDismiss { showingGlossary = true } },
+                    onClear: {
+                        showingMoreCard = false
+                        nextTranslation()
+                    }
+                )
             }
             .fullScreenCover(isPresented: $showingFullscreen) {
                 NavigationStack {
@@ -181,8 +196,26 @@ struct TranslateView: View {
                     isSpeaking = false
                     player.stop()
                 }
+                // Item 5: a delayed sheet open / auto-translate must not
+                // fire after leaving the page.
+                pendingSheetTask?.cancel()
+                pendingSheetTask = nil
+                autoTranslateTask?.cancel()
+                autoTranslateTask = nil
             }
-            .onChange(of: inputText) { _, _ in didCopy = false }
+            .onChange(of: inputText) { _, _ in
+                didCopy = false
+                scheduleAutoTranslate()
+            }
+            .onChange(of: playTranslationEnabled) { _, value in settings.playTranslation = value }
+            .onChange(of: autoTranslateEnabled) { _, value in
+                settings.autoTranslate = value
+                if !value {
+                    autoTranslateTask?.cancel()
+                    autoTranslateTask = nil
+                }
+            }
+            .onChange(of: detectLanguageEnabled) { _, value in settings.detectLanguage = value }
         }
     }
 
@@ -472,6 +505,11 @@ struct TranslateView: View {
             guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return (.chinese, .english)
             }
+            // Item 5: 检测语言 off → auto mode uses the explicit default
+            // instead of detecting the input language.
+            guard detectLanguageEnabled else {
+                return (.chinese, .english)
+            }
             let detected = TextLanguage.detect(inputText)
             return (detected, detected == .chinese ? .english : .chinese)
         }
@@ -514,6 +552,8 @@ struct TranslateView: View {
 
     /// "下一个": clear everything and focus the input for the next passage.
     private func nextTranslation() {
+        autoTranslateTask?.cancel()
+        autoTranslateTask = nil
         inputText = ""
         segments = []
         errorMessage = nil
@@ -521,6 +561,34 @@ struct TranslateView: View {
         fallbackUsed = false
         savedVocabIDs = []
         inputFocused = true
+    }
+
+    /// Item 5: dismiss the "..." card, then present another sheet.
+    /// Two sheets must not be true at once (SwiftUI only presents one),
+    /// so the new sheet waits for the card's dismiss animation.
+    @MainActor
+    private func openSheetAfterCardDismiss(_ present: @escaping () -> Void) {
+        showingMoreCard = false
+        pendingSheetTask?.cancel()
+        pendingSheetTask = Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            present()
+        }
+    }
+
+    /// Item 5: 自动翻译 — translate 1 second after the user stops typing.
+    @MainActor
+    private func scheduleAutoTranslate() {
+        autoTranslateTask?.cancel()
+        autoTranslateTask = nil
+        guard autoTranslateEnabled else { return }
+        guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        autoTranslateTask = Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, autoTranslateEnabled, !isTranslating else { return }
+            translationTask = Task { await runTranslation() }
+        }
     }
 
     // MARK: - Inline dictation (input mic)
@@ -782,6 +850,14 @@ struct TranslateView: View {
                 ))
             }
             try? modelContext.save()
+            // Item 5: 播放翻译 — read the translation aloud automatically.
+            // Only when voice is configured (otherwise speakTranslation
+            // would surface a "语音未配置" error on a good translation)
+            // and something actually got translated.
+            if playTranslationEnabled, voiceConfig != nil, !isSpeaking,
+               segments.contains(where: { !$0.translation.isEmpty }) {
+                toggleSpeak()
+            }
         } catch is CancellationError {
             // S24: cancelled via 取消 — finished segments stay on
             // screen, no error message.
@@ -868,5 +944,58 @@ struct GlossaryRowView: View {
                 .textInputAutocapitalization(.never)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// Item 5 (UI redesign): the "..." card, Apple style — settings on top,
+/// then the language toggles, then model / glossary / clear.
+/// Opened from the top-right "..." on the translate page; the
+/// conversation page (item 11) opens the same language toggles
+/// without the settings row.
+private struct MoreOptionsCard: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var playTranslationEnabled: Bool
+    @Binding var autoTranslateEnabled: Bool
+    @Binding var detectLanguageEnabled: Bool
+    var onOpenSettings: () -> Void
+    var onOpenModelPicker: () -> Void
+    var onOpenGlossary: () -> Void
+    var onClear: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button { onOpenSettings() } label: {
+                        Label("设置", systemImage: "gearshape")
+                    }
+                }
+                Section("语言") {
+                    Toggle("播放翻译", isOn: $playTranslationEnabled)
+                    Toggle("自动翻译", isOn: $autoTranslateEnabled)
+                    Toggle("检测语言", isOn: $detectLanguageEnabled)
+                }
+                Section {
+                    Button { onOpenModelPicker() } label: {
+                        Label("选择模型", systemImage: "cpu")
+                    }
+                    Button { onOpenGlossary() } label: {
+                        Label("术语表", systemImage: "book")
+                    }
+                }
+                Section {
+                    Button(role: .destructive) { onClear() } label: {
+                        Label("清空", systemImage: "trash")
+                    }
+                }
+            }
+            .navigationTitle("更多选项")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
     }
 }

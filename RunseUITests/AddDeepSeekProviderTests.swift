@@ -8,6 +8,10 @@ import XCTest
 /// The live API round-trip this test used to exercise is covered by the
 /// DeepSeek connector verification instead (custom.deepseek), not by UI.
 ///
+/// The entry point moved again in UI redesign item 5: the bottom tab bar
+/// is gone (pill nav: 翻译 / 相机 / 对话), and Settings is reached from
+/// the top-right "..." card on the translate page.
+///
 /// Run with:
 ///   xcodebuild test \
 ///     -scheme Zhiyin \
@@ -20,10 +24,14 @@ final class AddDeepSeekProviderTests: XCTestCase {
         app.launchArguments = ["ZHIYIN_SKIP_GUIDE"]
         app.launch()
 
-        // Settings tab → 选择模型.
-        let settingsTab = app.tabBars.buttons["设置"]
-        XCTAssertTrue(settingsTab.waitForExistence(timeout: 5))
-        settingsTab.tap()
+        // "..." card → 设置.
+        let moreButton = app.buttons["更多选项"]
+        XCTAssertTrue(moreButton.waitForExistence(timeout: 5))
+        moreButton.tap()
+
+        let settingsRow = app.buttons["设置"]
+        XCTAssertTrue(settingsRow.waitForExistence(timeout: 5))
+        settingsRow.tap()
 
         let pickerButton = app.buttons["选择模型"]
         XCTAssertTrue(pickerButton.waitForExistence(timeout: 5))

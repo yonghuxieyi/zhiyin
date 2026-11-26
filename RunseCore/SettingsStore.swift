@@ -46,4 +46,29 @@ public final class SettingsStore {
         get { defaults.bool(forKey: "dualModelCheckEnabled") }
         set { defaults.set(newValue, forKey: "dualModelCheckEnabled") }
     }
+
+    /// Item 5 (UI redesign): language-card toggles (Apple Translate style).
+    /// 检测语言 defaults ON — auto mode has always detected the input
+    /// language, so ON preserves current behavior.
+    /// 播放翻译 defaults OFF — auto-reading after every text translation
+    /// would burn TTS quota and surprise; the user opts in.
+    /// 自动翻译 defaults OFF — translating on every pause burns API
+    /// calls; the user opts in.
+    public var playTranslation: Bool {
+        get { defaults.bool(forKey: "playTranslation") }
+        set { defaults.set(newValue, forKey: "playTranslation") }
+    }
+
+    public var autoTranslate: Bool {
+        get { defaults.bool(forKey: "autoTranslate") }
+        set { defaults.set(newValue, forKey: "autoTranslate") }
+    }
+
+    public var detectLanguage: Bool {
+        get {
+            guard defaults.object(forKey: "detectLanguage") != nil else { return true }
+            return defaults.bool(forKey: "detectLanguage")
+        }
+        set { defaults.set(newValue, forKey: "detectLanguage") }
+    }
 }
