@@ -145,6 +145,24 @@ public final class InterpretationEngine: ObservableObject {
         self.quota = quotaStore.snapshot()
     }
 
+    /// N6 backstop: if the engine is dropped without `stop()` (view
+    /// dismissed mid-session), at least cancel the background work
+    /// and close the live sockets instead of leaking them.
+    deinit {
+        retryTask?.cancel()
+        audioFeedTask?.cancel()
+        fallbackTask?.cancel()
+        for task in eventTasks { task.cancel() }
+        recorder.stop()
+        router.stop()
+        let forward = forwardClient
+        let reverse = reverseClient
+        Task { [forward, reverse] in
+            await forward?.cancel()
+            await reverse?.cancel()
+        }
+    }
+
     // MARK: - Lifecycle
 
     public func start(

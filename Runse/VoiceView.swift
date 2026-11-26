@@ -35,6 +35,10 @@ struct VoiceView: View {
     private let streamingPlayer = StreamingAudioPlayer()
     private let recorder = VoiceRecorder()
     @State private var asrClient: VolcanoASRClient?
+    // N6: the two background loops must be cancellable handles, or
+    // they keep running after the page is left.
+    @State private var transcriptTask: Task<Void, Never>?
+    @State private var audioFeedTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
@@ -180,6 +184,14 @@ struct VoiceView: View {
                 configChecked = true
                 hasMyVoice = await QwenVoiceStore.loadVoiceID() != nil
             }
+            .onDisappear {
+                // N6: leaving the page must stop the mic / ASR socket,
+                // or recording keeps uploading with no UI and the mic
+                // indicator stays on.
+                if phase == .listening {
+                    Task { await stopListening() }
+                }
+            }
         }
     }
 
@@ -223,18 +235,22 @@ struct VoiceView: View {
             let client = VolcanoASRClient(config: config)
             asrClient = client
             let transcriptStream = try await client.start()
-            Task {
+            transcriptTask = Task {
                 for await (text, _) in transcriptStream {
                     transcript = text
                 }
             }
             let audioStream = try recorder.start()
-            Task {
+            audioFeedTask = Task {
                 for await chunk in audioStream {
                     try? await client.sendAudio(chunk)
                 }
             }
         } catch {
+            transcriptTask?.cancel()
+            transcriptTask = nil
+            audioFeedTask?.cancel()
+            audioFeedTask = nil
             await asrClient?.cancel()
             asrClient = nil
             phase = .idle
@@ -244,6 +260,10 @@ struct VoiceView: View {
 
     @MainActor
     private func stopListening() async {
+        transcriptTask?.cancel()
+        transcriptTask = nil
+        audioFeedTask?.cancel()
+        audioFeedTask = nil
         recorder.stop()
         guard let client = asrClient else {
             phase = .idle

@@ -25,6 +25,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 省额度：同一分支连续推几次只跑最后一次，前面没跑完的自动
+# 取消。macOS runner 按 Linux 10 倍计费，被新提交取代的构建
+# 纯属烧钱。组名按分支来，不同分支互不干扰。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-26

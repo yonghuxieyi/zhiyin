@@ -124,9 +124,15 @@ public enum Protobuf {
             case WireType.lengthDelimited.rawValue:
                 let (length, end) = try readVarint(data, from: offset)
                 offset = end
-                guard offset + Int(length) <= data.count else { throw DecodeError.truncated }
-                fields.append(.bytes(field: field, value: data.subdata(in: offset..<(offset + Int(length)))))
-                offset += Int(length)
+                // N4: `length` is a UInt64 straight off the wire; converting
+                // it to Int first traps when it exceeds Int.max, so a
+                // corrupt/truncated server frame would crash the app
+                // (a trap cannot be caught with try?). Compare in the
+                // UInt64 domain, then convert once it is known to fit.
+                guard length <= UInt64(data.count - offset) else { throw DecodeError.truncated }
+                let byteCount = Int(length)
+                fields.append(.bytes(field: field, value: data.subdata(in: offset..<(offset + byteCount))))
+                offset += byteCount
             case WireType.fixed32.rawValue:
                 guard offset + 4 <= data.count else { throw DecodeError.truncated }
                 var raw: UInt32 = 0

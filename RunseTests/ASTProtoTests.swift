@@ -133,6 +133,22 @@ final class ASTProtoTests: XCTestCase {
         XCTAssertNil(ASTResponse.decode(Data()))
     }
 
+    /// N4: a length-delimited field whose varint length exceeds
+    /// Int.max must throw instead of trapping on `Int(length)`.
+    /// Field 1, wire type 2, then a 10-byte varint encoding
+    /// UInt64.max as the length.
+    func testDecodeHugeLengthThrowsInsteadOfTrapping() {
+        var bytes: [UInt8] = [0x0A]
+        var value = UInt64.max
+        repeat {
+            var byte = UInt8(value & 0x7F)
+            value >>= 7
+            if value != 0 { byte |= 0x80 }
+            bytes.append(byte)
+        } while value != 0
+        XCTAssertThrowsError(try Protobuf.decode(Data(bytes)))
+    }
+
     func testVarintRoundTrip() {
         for value: UInt64 in [0, 1, 127, 128, 300, 16000, 24000, 20000000, 45000001, UInt64.max] {
             guard let fields = try? Protobuf.decode(Protobuf.encodeVarintField(field: 2, value: value)) else {

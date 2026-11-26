@@ -85,6 +85,14 @@ struct InterpretationView: View {
             .sheet(item: $selectedSession) { session in
                 InterpretationSessionDetailView(session: session)
             }
+            .onDisappear {
+                // N6: leaving the page must end the session, or the
+                // mic / live sockets keep running and the screen
+                // never locks again (isIdleTimerDisabled stays on).
+                if isRunning {
+                    Task { await stopSession() }
+                }
+            }
         }
     }
 

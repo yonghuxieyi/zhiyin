@@ -47,6 +47,10 @@ struct FaceToFaceView: View {
     private let streamingPlayer = StreamingAudioPlayer()
     private let player = AudioPlayer()
     @State private var asrClient: VolcanoASRClient?
+    // N6: the two background loops must be cancellable handles, or
+    // they keep running after the page is left.
+    @State private var transcriptTask: Task<Void, Never>?
+    @State private var audioFeedTask: Task<Void, Never>?
 
     private var latestTurn: FaceTurn? { turns.last }
 
@@ -143,6 +147,14 @@ struct FaceToFaceView: View {
         .task {
             config = await VolcanoVoiceStore.load()
         }
+        .onDisappear {
+            // N6: leaving the page must stop the mic / ASR socket,
+            // or recording keeps uploading with no UI and the mic
+            // indicator stays on.
+            if listeningSide != nil {
+                Task { await stopListening() }
+            }
+        }
     }
 
     @MainActor
@@ -162,18 +174,22 @@ struct FaceToFaceView: View {
             let client = VolcanoASRClient(config: config)
             asrClient = client
             let stream = try await client.start()
-            Task {
+            transcriptTask = Task {
                 for await (text, _) in stream {
                     liveTranscript = text
                 }
             }
             let audioStream = try recorder.start()
-            Task {
+            audioFeedTask = Task {
                 for await chunk in audioStream {
                     try? await client.sendAudio(chunk)
                 }
             }
         } catch {
+            transcriptTask?.cancel()
+            transcriptTask = nil
+            audioFeedTask?.cancel()
+            audioFeedTask = nil
             await asrClient?.cancel()
             asrClient = nil
             listeningSide = nil
@@ -183,6 +199,10 @@ struct FaceToFaceView: View {
 
     @MainActor
     private func stopListening() async {
+        transcriptTask?.cancel()
+        transcriptTask = nil
+        audioFeedTask?.cancel()
+        audioFeedTask = nil
         recorder.stop()
         guard let client = asrClient else {
             listeningSide = nil

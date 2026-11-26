@@ -398,7 +398,10 @@ public final class StreamingAudioPlayer {
         buffer.frameLength = AVAudioFrameCount(frameCount)
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
-            memcpy(channel, base, data.count)
+            // N5: the buffer holds frameCount * 2 bytes. Copying
+            // data.count would write 1 byte past the heap block when
+            // the PCM length is odd.
+            memcpy(channel, base, frameCount * 2)
         }
         return buffer
     }
