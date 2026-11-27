@@ -78,6 +78,12 @@ struct FaceToFaceView: View {
     /// continuous mode; long-press again exits.
     @State private var isContinuousMode = false
     @State private var isContinuousPaused = false
+    /// 2026-11-27: the continuous session has three states —
+    /// entered (long-press, not started: no engine, no ticker,
+    /// no billing), started (tap: engine live, ticker running),
+    /// paused (tap again). isContinuousMode covers entered +
+    /// started + paused; this flag marks started/paused only.
+    @State private var isContinuousStarted = false
     @State private var continuousElapsed: TimeInterval = 0
     @State private var continuousTickerTask: Task<Void, Never>?
     /// Item 11 (UI redesign, 22:51): the language card (top-right
@@ -286,7 +292,9 @@ struct FaceToFaceView: View {
                                 }
                             }
                             if interpretEngine.segments.isEmpty && interpretEngine.liveDraftSource.isEmpty && interpretEngine.liveDraftTranslation.isEmpty {
-                                Text("连续对话进行中，说话后译文会滚动出现在这里。")
+                                // 2026-11-27: not started yet — do
+                                // not claim a session is running.
+                                Text(isContinuousStarted ? "连续对话进行中，说话后译文会滚动出现在这里。" : "点一下麦克风开始，说话后译文会滚动出现在这里。")
                                     .font(.callout)
                                     .foregroundStyle(.secondary)
                                     .multilineTextAlignment(.center)
@@ -613,23 +621,42 @@ struct FaceToFaceView: View {
     /// long-press exits it. (A plain Button cannot take a long-press,
     /// so this is a label with tap + long-press gestures; the
     /// disabled look is an opacity, and the tap does nothing.)
+    /// 2026-11-27: long-press only enters the not-started state
+    /// (label "开始", light green); tap there starts the session,
+    /// tap while started pauses / resumes it.
     private func dualMicButton(side: FaceSide) -> some View {
         let listening = listeningSide == side
         let labelText: String = {
-            if isContinuousMode { return isContinuousPaused ? "继续" : "暂停" }
+            if isContinuousMode {
+                // 2026-11-27: not started yet — tap starts.
+                if !isContinuousStarted { return "开始" }
+                return isContinuousPaused ? "继续" : "暂停"
+            }
             if listening { return "正在听…" }
             return side == .me ? "我说" : "对方说话"
+        }()
+        let buttonColor: Color = {
+            if isContinuousMode { return isContinuousStarted ? Color.green : Color.green.opacity(0.3) }
+            if listening { return Color.green }
+            return Color.accentColor
         }()
         let busyElsewhere = isWorking || (listeningSide != nil && listeningSide != side)
         return Label(labelText, systemImage: "mic")
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
-            .background((isContinuousMode || listening) ? Color.green : Color.accentColor, in: Capsule())
-            .foregroundStyle(.white)
+            .background(buttonColor, in: Capsule())
+            .foregroundStyle(isContinuousMode && !isContinuousStarted ? Color.green : Color.white)
             .opacity(busyElsewhere && !isContinuousMode ? 0.5 : 1)
             .onTapGesture {
                 if isContinuousMode {
-                    toggleContinuousPause()
+                    // 2026-11-27: tap in the not-started state
+                    // starts the session; tap while started
+                    // pauses / resumes it.
+                    if isContinuousStarted {
+                        toggleContinuousPause()
+                    } else {
+                        Task { await startContinuousSession() }
+                    }
                 } else if listening {
                     toggleTask = Task { await stopListening() }
                 } else if !busyElsewhere {
@@ -649,19 +676,24 @@ struct FaceToFaceView: View {
 
     /// Item 9 (21:51): a small sound-wave animation while the
     /// continuous session is live; frozen low bars while paused.
+    /// 2026-11-27: nothing is live before the session starts,
+    /// so no waveform at all there; once started it animates,
+    /// and freezes while paused.
     private var continuousWaveform: some View {
         Group {
-            if isContinuousPaused {
-                HStack(spacing: 3) {
-                    ForEach(0..<5) { _ in
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color.green.opacity(0.5))
-                            .frame(width: 3, height: 8)
+            if isContinuousStarted {
+                if isContinuousPaused {
+                    HStack(spacing: 3) {
+                        ForEach(0..<5) { _ in
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(Color.green.opacity(0.5))
+                                .frame(width: 3, height: 8)
+                        }
                     }
+                    .frame(height: 28)
+                } else {
+                    WaveformView()
                 }
-                .frame(height: 28)
-            } else {
-                WaveformView()
             }
         }
     }
@@ -671,31 +703,43 @@ struct FaceToFaceView: View {
     /// 22:59); in continuous mode tap pauses / resumes. Tap and
     /// long-press are exclusive gestures — a quick tap never fires
     /// the long-press, and a 1-second hold never fires the tap.
+    /// 2026-11-27: long-press enters the not-started state (mic
+    /// icon, light green, no time); tap there starts the session.
     private var singleMicButton: some View {
         Group {
             if isContinuousMode {
-                // 23:49: in continuous mode the mic icon becomes the
-                // elapsed time, digits only.
-                VStack(spacing: 2) {
-                    if isContinuousPaused {
-                        // 00:20 (final): paused — time at the top of
-                        // the button, the enlarged pause glyph
-                        // centered below it. The translucent-overlay
-                        // and arc versions are void.
-                        Text(continuousTimeText)
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                        Image(systemName: "pause.fill")
-                            .font(.system(size: 34))
+                // 2026-11-27: not started yet — the mic icon on
+                // light green, no time (nothing has started, so
+                // there is no elapsed time to show). Tap starts.
+                // Once started, the icon becomes the elapsed
+                // time, digits only (23:49).
+                Group {
+                    if !isContinuousStarted {
+                        Image(systemName: "mic.fill")
+                            .font(.title2)
                     } else {
-                        Text(continuousTimeText)
-                            .font(.title3)
-                            .fontWeight(.semibold)
+                        VStack(spacing: 2) {
+                            if isContinuousPaused {
+                                // 00:20 (final): paused — time at the top of
+                                // the button, the enlarged pause glyph
+                                // centered below it. The translucent-overlay
+                                // and arc versions are void.
+                                Text(continuousTimeText)
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                Image(systemName: "pause.fill")
+                                    .font(.system(size: 34))
+                            } else {
+                                Text(continuousTimeText)
+                                    .font(.title3)
+                                    .fontWeight(.semibold)
+                            }
+                        }
                     }
                 }
                 .frame(width: 96, height: 96)
-                .background(Color.green, in: Circle())
-                .foregroundStyle(.white)
+                .background(isContinuousStarted ? Color.green : Color.green.opacity(0.3), in: Circle())
+                .foregroundStyle(isContinuousStarted ? Color.white : Color.green)
             } else {
                 Image(systemName: listeningSide != nil ? "stop.fill" : "mic.fill")
                     .font(.title2)
@@ -708,7 +752,14 @@ struct FaceToFaceView: View {
         .overlay(quotaRing(diameter: isContinuousMode ? 106 : 82))
         .onTapGesture {
             if isContinuousMode {
-                toggleContinuousPause()
+                // 2026-11-27: tap in the not-started state
+                // starts the session; tap while started
+                // pauses / resumes it.
+                if isContinuousStarted {
+                    toggleContinuousPause()
+                } else {
+                    Task { await startContinuousSession() }
+                }
             } else if !isWorking {
                 toggleTask = Task { await toggleSingleListening() }
             }
@@ -779,6 +830,7 @@ struct FaceToFaceView: View {
 
     private var singleMicLabel: String {
         if isContinuousMode {
+            if !isContinuousStarted { return "开始连续对话" }
             return isContinuousPaused ? "继续连续对话" : "暂停连续对话"
         }
         return listeningSide != nil ? "停止" : "开始说话"
@@ -802,6 +854,10 @@ struct FaceToFaceView: View {
     /// two-way (21:51): the single user speaks Chinese to English
     /// (the only target language today, 21:33); two people get both
     /// directions, switched by auto-detected language.
+    /// 2026-11-27: long-press only enters the "not started"
+    /// state — no ticker, no engine, no billing yet, so a stray
+    /// long-press burns no session. Tap starts the session
+    /// (see startContinuousSession).
     @MainActor
     private func startContinuousMode() async {
         guard !isContinuousMode, !isWorking, listeningSide == nil else { return }
@@ -823,6 +879,23 @@ struct FaceToFaceView: View {
         pendingSide = nil
         isContinuousMode = true
         isContinuousPaused = false
+        isContinuousStarted = false
+        continuousElapsed = 0
+    }
+
+    /// 2026-11-27: tap in the not-started state starts the live
+    /// session — the ticker, the engine and the billing clock
+    /// all begin here, not on the long-press entry.
+    @MainActor
+    private func startContinuousSession() async {
+        guard isContinuousMode, !isContinuousStarted else { return }
+        guard let config else {
+            errorMessage = "语音未配置。"
+            return
+        }
+        micHaptic(.medium)
+        errorMessage = nil
+        isContinuousStarted = true
         continuousElapsed = 0
         startContinuousTicker()
         // M11: keep the screen awake for the whole session.
@@ -915,11 +988,16 @@ struct FaceToFaceView: View {
     /// the continuous-mode button again is the end). The flags drop
     /// first so a second call hits the guard instead of persisting
     /// the session twice.
+    /// 2026-11-27: also safe from the not-started state — the
+    /// engine's stop() on an idle engine returns an empty record
+    /// (no turns, no history, no quota), and the streaming
+    /// client is nil there, so the disconnect is skipped.
     @MainActor
     private func stopContinuousMode() async {
         guard isContinuousMode else { return }
         isContinuousMode = false
         isContinuousPaused = false
+        isContinuousStarted = false
         continuousElapsed = 0
         stopContinuousTicker()
         let record = await interpretEngine.stop()
@@ -962,9 +1040,11 @@ struct FaceToFaceView: View {
     /// The engine keeps the finished content (21:58: pause keeps
     /// what came before) and rebuilds the socket on resume if it
     /// went stale; the one-shot loop is not involved any more.
+    /// 2026-11-27: only once the session has started — tap in
+    /// the not-started state starts it instead.
     @MainActor
     private func toggleContinuousPause() {
-        guard isContinuousMode else { return }
+        guard isContinuousMode, isContinuousStarted else { return }
         micHaptic(.light)
         if isContinuousPaused {
             isContinuousPaused = false
