@@ -163,8 +163,28 @@ struct FaceToFaceView: View {
                         .frame(width: 64, alignment: .leading)
                     }
                     ToolbarItem(placement: .principal) {
-                        Text("对话")
-                            .font(.headline)
+                        // 2026-11-27: in continuous mode the title
+                        // is 同传; pausing is still continuous, so
+                        // it only returns to 对话 on a real stop.
+                        // The 同传 title gets a gradient in the
+                        // app's green/blue-green palette; 对话
+                        // stays the plain default title colour.
+                        Group {
+                            if isContinuousMode {
+                                Text("同传")
+                                    .font(.headline)
+                                    .foregroundStyle(
+                                        LinearGradient(
+                                            colors: [.green, .teal, .blue],
+                                            startPoint: .leading,
+                                            endPoint: .trailing
+                                        )
+                                    )
+                            } else {
+                                Text("对话")
+                                    .font(.headline)
+                            }
+                        }
                     }
                     // Item 11 (22:51): the language card opens from
                     // the top-right "…". The button overlays the
