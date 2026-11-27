@@ -48,7 +48,17 @@ jobs:
           xcodebuild -version
 
       - name: Download iOS platform
-        run: sudo xcodebuild -downloadPlatform iOS
+        run: |
+          for attempt in 1 2 3; do
+            if sudo xcodebuild -downloadPlatform iOS; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Download attempt $attempt failed, retrying in 30s..."
+              sleep 30
+            fi
+          done
+          exit 1
 
       - name: Install xcodegen
         run: brew install xcodegen
