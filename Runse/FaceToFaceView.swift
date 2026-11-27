@@ -898,8 +898,16 @@ struct FaceToFaceView: View {
         isContinuousStarted = true
         continuousElapsed = 0
         startContinuousTicker()
-        // M11: keep the screen awake for the whole session.
-        UIApplication.shared.isIdleTimerDisabled = true
+        // 2026-11-27 (息屏后台续跑，最小版): the screen is
+        // allowed to lock now — the session keeps running in
+        // the background on UIBackgroundModes audio (declared
+        // in project.yml info.properties, verified present in
+        // the shipped IPA) with the recorder engine running
+        // for the whole session. Do NOT disable the idle timer
+        // here: the old M11 line is what kept the screen
+        // awake for the whole session. Leaving the page still
+        // ends the session (N6, onDisappear) — locking or
+        // backgrounding is not leaving the page.
         await startInterpretEngine(config: config)
     }
 
@@ -1006,7 +1014,9 @@ struct FaceToFaceView: View {
             continuousStreamingClient = nil
             await client.disconnect()
         }
-        UIApplication.shared.isIdleTimerDisabled = false
+        // 2026-11-27 (息屏后台续跑): no idle-timer reset here —
+        // startContinuousSession no longer disables it, so there
+        // is nothing to restore.
         // Keep the session visible in the conversation list after
         // exit: the engine's segments become turns (a zh→en segment
         // is mine speaking, an en→zh segment is the other person).
